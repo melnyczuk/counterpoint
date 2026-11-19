@@ -178,6 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("profile", help="analyse the catalogue ahead of time")
     p.set_defaults(func=_profile)
+
+    from .ensemble_cli import add_parsers
+
+    add_parsers(sub)
     return ap
 
 

@@ -16,9 +16,8 @@ Ableton clip's Transpose and Warp), so a sample can be reused at different shift
 different places.
 
 Design and roadmap: [docs/design.md](docs/design.md). That covers the planned `pack`
-command (a key-sorted folder of samples for Ableton), ensemble `voice` mode (instances
-that listen to each other and change sample every few loops) and running one voice per
-Raspberry Pi in a spatial installation.
+command (a key-sorted folder of samples for Ableton), the ensemble (below), and running
+one voice per Raspberry Pi in a spatial installation. Tasks are tracked as GitHub issues.
 
 ## Status (v0.1)
 
@@ -29,8 +28,8 @@ Raspberry Pi in a spatial installation.
 - [x] Tempo matching: stretch ratio with half/double time, stretch cost, limits
 - [x] Layering sets: combined fit, band masking and same-recording penalties, texture layer
 - [x] `counterpoint match` with table, JSON and an Ableton set-folder export
+- [x] Ensemble: `voice`, `ensemble` (start, status, set), `listen`, `replay`
 - [ ] `counterpoint pack`
-- [ ] Ensemble `voice` mode, Link, OSC, playback
 - [ ] Max for Live device
 - [ ] Raspberry Pi deployment
 
@@ -74,6 +73,49 @@ Am9 in A minor, 96.0 BPM: 41 pitched matches of 230 samples
 
 Chord symbols: `C`, `Am`, `F#m7`, `Bbmaj7`, `Fmaj7#11`, `G7b9`, `Bø`, `Bm7b5`, `Cdim7`,
 `Caug`, `Dsus4`, `Esus2`, `Cadd9`, `C6/9`, `E5`, `G7alt`, `C/G`.
+
+## Ensemble
+
+Several voices, each looping one sample and changing it every few loops to fit what the
+others are playing. Voices share tempo and bar lines through Ableton Link, and tell each
+other what they're playing over OSC multicast on the local network. Run them on one
+laptop now, and later one per Raspberry Pi.
+
+```sh
+counterpoint ensemble --voices 4 --anchor Am9 --bpm 90      # four voices, panned across stereo
+counterpoint ensemble --voices 4 --spread-channels          # voice N on outputs 2N-1,2N
+counterpoint ensemble --voices 5 --textures 1               # one of them plays only textures
+counterpoint voice --name low --band low --loops 6          # a single voice (one per Pi)
+counterpoint ensemble status                                # who's playing what, next change
+counterpoint ensemble set anchor Dm9                        # every voice, from its next pick
+counterpoint ensemble set volume 0.5 --voice v2
+counterpoint listen --midi                                  # a keyboard player joins as a voice
+counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
+```
+
+- **Picking:** two bars before its change (`--prepare-bars`), a voice scores the library
+  against the other voices' combined profile (their announced next picks where there
+  are any), plus the input and `--anchor`. It draws from the best few and announces its
+  pick. Voices changing on the same bar pick one at a time, in name order.
+- **Playing:** the pick is shifted and stretched in memory with Rubber Band, so the loop
+  lasts a whole number of beats at the session tempo. It starts on the bar with a 10 ms
+  crossfade. Nothing is written to disk.
+- **Loops:** `--loops 4-8` draws a new count each time. The change lands on the next bar
+  line after that many loops.
+- **Sync:** Ableton (Live 11+) joins the same Link session if Link is on in its
+  preferences. Use `--no-link` for local time, and `--peers host:port` where the network
+  blocks multicast.
+- **Logs:** each voice logs its picks to `~/.local/state/counterpoint/NAME.jsonl`.
+  `replay` renders a stereo mix of a run from those logs.
+- **No sound card:** `--dry-run` schedules everything silently, which is useful for
+  checking a setup.
+
+On Linux (and the Pi), install PortAudio for audio out: `sudo apt install libportaudio2`.
+For now, voices read straight from the winnower catalogue. Packs (#11) will replace that
+for the Pis.
+
+**Licences:** Rubber Band (through pedalboard) is GPLv3 and Link is GPLv2+, so builds
+of Counterpoint that include them are distributed under the GPL.
 
 ## Settings
 

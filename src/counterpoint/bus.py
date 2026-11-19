@@ -76,7 +76,7 @@ class VoiceState:
 
 @dataclass
 class Control:
-    set: str  # anchor | tempo | volume | loops
+    set: str  # anchor | tempo | volume | swell | swell-bars | swell-drift | loops | stop
     value: str
     voice: str | None = None  # None means every voice
     id: str = field(default_factory=lambda: uuid.uuid4().hex)

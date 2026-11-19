@@ -3,6 +3,7 @@ import json
 import random
 
 import numpy as np
+import pytest
 
 from counterpoint.bus import CONTROL, Control, MemoryBus, Playing, VoiceState
 from counterpoint.catalogue import Catalogue
@@ -13,7 +14,7 @@ from counterpoint.harmony import NOTES
 from counterpoint.player import NullPlayer
 from counterpoint.profile import ProfileCache, profiles_for
 from counterpoint.render import Loop, loop_beats
-from counterpoint.replay import mixdown, read_logs
+from counterpoint.replay import Entry, mixdown, read_logs, swell_curve
 from counterpoint.voice import Voice, VoiceSettings
 
 
@@ -97,6 +98,7 @@ def test_four_voices(big_catalogue, cache_dir, tmp_path):
     asyncio.run(go())
     assert all(v.changes == 4 for v in voices)
     assert clashes == []
+    assert all(v.player.mixer.swell != 1.0 for v in voices)  # every voice is swelling
     logs = [json.loads(line) for i in range(4)
             for line in (tmp_path / f"v{i + 1}.jsonl").read_text().splitlines()]
     assert len(logs) == 16
@@ -105,6 +107,7 @@ def test_four_voices(big_catalogue, cache_dir, tmp_path):
     # Voices that changed on the same bar announced their picks in name order.
     for e in logs:
         assert e["reference"]
+        assert e["swell_db"] == 6.0 and 0 <= e["swell_phase"] < 1
 
 
 def test_control_messages(big_catalogue, cache_dir):
@@ -119,7 +122,8 @@ def test_control_messages(big_catalogue, cache_dir):
         await remote.start(lambda *a: None)
         for c in (Control("anchor", "Dm9"), Control("tempo", "120"),
                   Control("volume", "0.5", voice="v1"), Control("loops", "2-3"),
-                  Control("volume", "0.1", voice="v9")):
+                  Control("volume", "0.1", voice="v9"), Control("swell", "0"),
+                  Control("swell-bars", "6", voice="v1"), Control("swell-drift", "0.3")):
             remote.send(CONTROL, c.to_json())
 
     asyncio.run(go())
@@ -127,6 +131,25 @@ def test_control_messages(big_catalogue, cache_dir):
     assert clock.tempo == 120
     assert v.player.mixer.gain == 0.5  # the v9-only message didn't apply
     assert v.s.loops == (2, 3)
+    assert v.swell.depth_db == 0 and v.swell.gain() == 1.0
+    assert v.swell.base_beats == 24 and v.swell.drift == 0.3
+
+
+def test_swell_redraws_at_loop_points(big_catalogue, cache_dir):
+    cat, lib = library(big_catalogue, cache_dir)
+    v = Voice(VoiceSettings("v1", swell_drift=0.3), cat, Chooser(lib), FreeClock(96),
+              MemoryBus(MemoryBus.Hub()), NullPlayer(8000))
+    v._start_loop(8.0, 4.0)
+    first = v.swell.period
+    phase = v.swell.phase
+    v._swell_to(11.0)
+    assert v.swell.period == first and v.swell.phase != phase
+    periods = {first}
+    for beat in (12.5, 16.5, 20.5, 24.5):
+        v._swell_to(beat)
+        periods.add(v.swell.period)
+    assert len(periods) == 5  # a new period every loop
+    assert v.player.mixer.swell == pytest.approx(v.swell.gain())
 
 
 def test_replay_mixdown(big_catalogue, tmp_path):
@@ -143,6 +166,21 @@ def test_replay_mixdown(big_catalogue, tmp_path):
     mix = mixdown(read_logs([log]), sr=8000)
     assert mix.shape == (2, 8 * 4000)  # 8 beats at 120 = 4 s
     assert np.abs(mix[:, :16000]).max() > 0.01
+    entries[0].update(swell_db=6.0, swell_bars=1.0, swell_drift=0.2, swell_phase=0.25)
+    log.write_text("\n".join(json.dumps(e) for e in entries))
+    swelled = mixdown(read_logs([log]), sr=8000)
+    assert not np.allclose(swelled, mix)
+
+
+def test_replay_swell_curve():
+    e = Entry("v1", 0, 120, "x", 0, 1.0, 4, 2, 0.0, 6.0, 1.0, 0.2, 0.25)
+    c = swell_curve(e, 16000, 2000.0)  # 8 beats at 2000 frames a beat
+    db = 20 * np.log10(c)
+    assert db[0] == pytest.approx(3.0, abs=0.01)  # phase 0.25: the top of the swell
+    assert db.max() <= 3.0 + 1e-4 and db.min() >= -3.0 - 1e-4
+    assert np.abs(np.diff(db)).max() < 0.05  # smooth across the loop point
+    flat = Entry("v1", 0, 120, "x", 0, 1.0, 4, 2, 0.0)
+    assert np.all(swell_curve(flat, 100, 2000.0) == 1)
 
 
 def test_voice_commands():
@@ -157,6 +195,10 @@ def test_voice_commands():
     assert "--texture" in cmds[2] and "--texture" not in cmds[0]
     assert "--bpm" in cmds[0] and "--bpm" not in cmds[1]
     assert cmds[0][cmds[0].index("--pan") + 1] == "-0.80"
+    bars = [c[c.index("--swell-bars") + 1] for c in cmds]
+    assert len(set(bars)) == 3  # each voice swells on its own period
+    A.swell_bars = [3.0, 5.0]
+    assert [c[c.index("--swell-bars") + 1] for c in voice_commands(A)] == ["3", "5", "3"]
 
 
 def test_format_status():

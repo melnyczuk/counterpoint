@@ -9,6 +9,9 @@ Timeline for one change at beat ``B`` (always a bar line):
 3. at ``B`` the new loop takes over with a short crossfade; the voice draws how many
    loops to play this time and announces its next change.
 
+All the while, the voice's level swells slowly on its own period (see
+:class:`~counterpoint.player.Swell`), redrawn a little differently every loop.
+
 The voice never writes audio to disk and never touches the catalogue.
 """
 
@@ -27,6 +30,7 @@ from .bus import CONTROL, STATE, Control, Peers, Playing, VoiceState
 from .catalogue import Catalogue
 from .chooser import Choice, Chooser
 from .clock import BEATS_PER_BAR, Clock, next_bar, seconds_until, wait_until
+from .player import Swell
 from .render import Loop, loop_beats, render_from
 
 log = logging.getLogger("counterpoint.voice")
@@ -51,6 +55,10 @@ class VoiceSettings:
     log_path: Path | None = None
     pan: float = 0.0
     seed: int | None = None
+    swell_db: float = 6.0  # peak to trough; 0 holds the level steady
+    swell_bars: float = 4.0  # this voice's swell period, before drift
+    swell_drift: float = 0.15  # how far the period wanders each loop, as a fraction
+    swell_tick_s: float = 0.05
     extra: dict = field(default_factory=dict)
 
 
@@ -73,6 +81,11 @@ class Voice:
         self._controls_seen: set[str] = set()
         self._stop = asyncio.Event()
         self.changes = 0
+        self.swell = Swell(settings.swell_db, settings.swell_bars * BEATS_PER_BAR,
+                           settings.swell_drift, seed=settings.name)
+        self._swell_beat: float | None = None  # where the swell has been advanced to
+        self._next_wrap: float | None = None  # the current loop's next loop point
+        self._loop_beats: float | None = None
 
     # -- messages ---------------------------------------------------------------------
 
@@ -105,6 +118,13 @@ class Voice:
             self.clock.tempo = float(c.value)
         elif c.set == "volume":
             self.player.mixer.gain = max(0.0, float(c.value))
+        elif c.set == "swell":
+            self.swell.depth_db = self.s.swell_db = max(0.0, float(c.value))
+        elif c.set == "swell-bars":
+            self.s.swell_bars = max(0.25, float(c.value))
+            self.swell.base_beats = self.s.swell_bars * BEATS_PER_BAR
+        elif c.set == "swell-drift":
+            self.swell.drift = self.s.swell_drift = max(0.0, min(0.9, float(c.value)))
         elif c.set == "loops":
             self.s.loops = parse_loops(c.value)
         elif c.set == "stop":
@@ -115,6 +135,38 @@ class Voice:
         while not self._stop.is_set():
             self.announce()
             await asyncio.sleep(self.s.heartbeat_s)
+
+    # -- swelling ---------------------------------------------------------------------
+
+    def _swell_to(self, beat: float) -> None:
+        """Advance the swell to ``beat``, redrawing its period at every loop point passed."""
+        if self._swell_beat is None:
+            self._swell_beat = beat
+            return
+        while self._next_wrap is not None and self._next_wrap <= beat:
+            wrap = self._next_wrap
+            if wrap > self._swell_beat:
+                self.swell.advance(wrap - self._swell_beat)
+                self._swell_beat = wrap
+            self.swell.new_loop(f"{self.s.name}:{wrap:g}")
+            self._next_wrap = wrap + self._loop_beats
+        if beat > self._swell_beat:
+            self.swell.advance(beat - self._swell_beat)
+            self._swell_beat = beat
+        self.player.mixer.swell = self.swell.gain()
+
+    def _start_loop(self, beat: float, loop_beats: float) -> None:
+        """A new loop starts at ``beat``: its loop points drive the swell from here."""
+        self._next_wrap = None
+        self._swell_to(beat)
+        self._loop_beats = max(loop_beats, 1.0)
+        self._next_wrap = beat
+        self._swell_to(beat)
+
+    async def _swell_loop(self) -> None:
+        while not self._stop.is_set():
+            self._swell_to(self.clock.beat)
+            await asyncio.sleep(self.s.swell_tick_s)
 
     # -- choosing ---------------------------------------------------------------------
 
@@ -151,6 +203,7 @@ class Voice:
         """Play until stopped (or for ``changes`` changes, for tests)."""
         await self.bus.start(self._on_message)
         hb = asyncio.create_task(self._heartbeat())
+        sw = asyncio.create_task(self._swell_loop())
         try:
             change = next_bar(self.clock.beat + self.s.prepare_beats)
             self.change_beat = change
@@ -160,6 +213,7 @@ class Voice:
                 frame = self.player.frame_in(seconds_until(self.clock, change))
                 self.player.mixer.schedule(loop, frame)
                 await wait_until(self.clock, change)
+                self._start_loop(change, loop.beats)
                 n = self.rng.randint(*self.s.loops)
                 self.now, self.next = self.next, None
                 self.now.loop_beats = loop.beats
@@ -172,6 +226,7 @@ class Voice:
         finally:
             self._stop.set()
             hb.cancel()
+            sw.cancel()
 
     def stop(self) -> None:
         self._stop.set()
@@ -185,7 +240,9 @@ class Voice:
             "ratio": None if m.stretch is None else m.stretch.ratio,
             "loop_beats": loop.beats, "loops": loops, "reference": choice.reference,
             "anchor": self.chooser.role.anchor, "pan": self.s.pan,
-            "score": round(m.score, 4),
+            "score": round(m.score, 4), "gain_db": round(loop.gain_db, 2),
+            "swell_db": self.swell.depth_db, "swell_bars": self.s.swell_bars,
+            "swell_drift": self.swell.drift, "swell_phase": round(self.swell.phase, 6),
         }
         log.info("%s: bar %d plays %s (shift %+d, %s loops) against %s", self.s.name,
                  int(beat // BEATS_PER_BAR) + 1, Path(m.sample.file).name, m.shift, loops,

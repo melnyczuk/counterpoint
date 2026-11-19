@@ -2,11 +2,16 @@
 
 The mixing is a pure function (:meth:`Mixer.block`) so it can be tested without a sound
 card; :class:`DevicePlayer` drives it from a sounddevice (PortAudio) callback.
+
+:class:`Swell` is the slow rise and fall of a voice's level. Each voice swells on its own
+period, which drifts a little every loop, so the voices phase against each other and
+each one comes to the fore now and then.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import threading
 from dataclasses import dataclass
 
@@ -23,6 +28,34 @@ def pan_gains(pan: float) -> tuple[float, float]:
     return math.cos(a), math.sin(a)
 
 
+class Swell:
+    """A slow sine on a voice's level, ``depth_db`` peak to trough, about ``base_beats``
+    long. Every loop, :meth:`new_loop` redraws the period within ``drift`` (a fraction)
+    of the base. The phase is accumulated rather than worked out from the beat, so a new
+    period never makes the level jump. Draws are seeded, so a replay can repeat them."""
+
+    def __init__(self, depth_db: float = 6.0, base_beats: float = 16.0, drift: float = 0.15,
+                 seed: str = ""):
+        self.depth_db = depth_db
+        self.base_beats = base_beats
+        self.drift = drift
+        self.period = base_beats
+        self.phase = random.Random(f"{seed}:phase").random()
+
+    def new_loop(self, key: str) -> None:
+        u = random.Random(key).uniform(-1.0, 1.0)
+        self.period = max(1.0, self.base_beats * (1 + self.drift * u))
+
+    def advance(self, beats: float) -> None:
+        self.phase = (self.phase + max(0.0, beats) / self.period) % 1.0
+
+    def db(self) -> float:
+        return self.depth_db / 2 * math.sin(2 * math.pi * self.phase)
+
+    def gain(self) -> float:
+        return 10 ** (self.db() / 20)
+
+
 @dataclass
 class _Voice:
     loop: Loop
@@ -37,6 +70,8 @@ class Mixer:
         self.sr = sr
         self.pan = pan
         self.gain = gain
+        self.swell = 1.0  # set from outside; ramped to across each block
+        self._swell_now = 1.0
         self._cur: _Voice | None = None
         self._out: _Voice | None = None  # fading out
         self._fade_left = 0
@@ -82,8 +117,11 @@ class Mixer:
             self._render(out, start, n)
             self.frame += n
         lg, rg = pan_gains(self.pan)
-        out[0] *= lg * self.gain
-        out[1] *= rg * self.gain
+        target = self.swell
+        env = self._swell_now + (target - self._swell_now) * np.arange(1, n + 1) / n
+        self._swell_now = target
+        out[0] *= lg * self.gain * env
+        out[1] *= rg * self.gain * env
         return out
 
     def _render(self, out: np.ndarray, a: int, b: int) -> None:

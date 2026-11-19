@@ -89,6 +89,8 @@ counterpoint voice --name low --band low --loops 6          # a single voice (on
 counterpoint ensemble status                                # who's playing what, next change
 counterpoint ensemble set anchor Dm9                        # every voice, from its next pick
 counterpoint ensemble set volume 0.5 --voice v2
+counterpoint ensemble --voices 4 --swell-bars 3,4,5,7     # each voice swells on its own period
+counterpoint ensemble set swell 0                           # hold every voice's level steady
 counterpoint listen --midi                                  # a keyboard player joins as a voice
 counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
 ```
@@ -100,6 +102,14 @@ counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
 - **Playing:** the pick is shifted and stretched in memory with Rubber Band, so the loop
   lasts a whole number of beats at the session tempo. It starts on the bar with a 10 ms
   crossfade. Nothing is written to disk.
+- **Levels:** every loop is brought to -20 LUFS (BS.1770 loudness, ignoring silences)
+  before it plays, so a hot sample doesn't bury the others. Quiet ones are boosted by at
+  most 12 dB, and peaks stay under 0.9. `--no-normalise` plays loops at their own level.
+- **Swells:** each voice's level rises and falls slowly, `--swell 6` dB peak to trough,
+  over about `--swell-bars 4` bars. The period drifts by up to `--swell-drift 0.15` every
+  loop, so the voices phase against each other and each one comes to the fore now and
+  then. `ensemble` gives each voice a slightly different period, or takes a list. Change
+  them live with `set swell|swell-bars|swell-drift VALUE [--voice vN]`.
 - **Loops:** `--loops 4-8` draws a new count each time. The change lands on the next bar
   line after that many loops.
 - **Sync:** Ableton (Live 11+) joins the same Link session if Link is on in its

@@ -5,6 +5,7 @@
     counterpoint ensemble status                         # who's playing what
     counterpoint ensemble set anchor Dm9                 # steer every voice
     counterpoint ensemble set volume 0.5 --voice v2
+    counterpoint ensemble set swell-bars 6 --voice v3     # a slower swell for one voice
     counterpoint listen --midi                           # a MIDI player as a voice
     counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import signal
@@ -25,6 +27,7 @@ from pathlib import Path
 from .bus import CONTROL, STATE, Control, MemoryBus, UdpBus, VoiceState
 from .chooser import BANDS, Chooser, Library, Role
 from .clock import BEATS_PER_BAR, FreeClock, LinkClock
+from .render import render_from
 from .scoring import Limits
 from .voice import Voice, VoiceSettings, parse_loops
 
@@ -39,6 +42,20 @@ def _channels(text: str) -> tuple[int, ...]:
     if not 1 <= len(ch) <= 2 or min(ch) < 1:
         raise argparse.ArgumentTypeError("channels: one or two outputs, 1-based, e.g. 3,4")
     return ch
+
+
+def _swell_bars(text: str) -> list[float]:
+    try:
+        bars = [float(b) for b in str(text).split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError("swell bars: a number, or a list like 3,4,5") from None
+    if not bars or min(bars) <= 0:
+        raise argparse.ArgumentTypeError("swell bars must be positive")
+    return bars
+
+
+# How a single --swell-bars is spread across ensemble voices, so they start out of step.
+SWELL_SPREAD = (1.0, 1.13, 0.89, 1.27, 0.79, 1.41, 0.71, 1.19)
 
 
 def add_voice_args(p: argparse.ArgumentParser, single: bool = True) -> None:
@@ -58,6 +75,16 @@ def add_voice_args(p: argparse.ArgumentParser, single: bool = True) -> None:
     p.add_argument("--bpm", type=float, help="set the session tempo")
     p.add_argument("--device", help="output device name or number")
     p.add_argument("--volume", type=float, default=0.8)
+    p.add_argument("--swell", type=float, default=6.0,
+                   help="how far each voice's level swells, dB peak to trough (0: off)")
+    p.add_argument("--swell-bars", type=(float if single else _swell_bars),
+                   default=(4.0 if single else [4.0]),
+                   help="bars per swell" + ("" if single else
+                        "; a list like 3,4,5,7 gives one per voice"))
+    p.add_argument("--swell-drift", type=float, default=0.15,
+                   help="how far the swell period wanders each loop (fraction)")
+    p.add_argument("--no-normalise", action="store_true",
+                   help="play loops at their own level instead of matching loudness")
     p.add_argument("--sr", type=int, default=48000)
     p.add_argument("--prepare-bars", type=int, default=2,
                    help="bars before a change to pick and render")
@@ -111,8 +138,12 @@ def _make_voice(args, bus=None, clock=None, player=None) -> Voice:
         name=args.name, loops=parse_loops(args.loops),
         prepare_beats=args.prepare_bars * BEATS_PER_BAR,
         log_path=args.log or state_dir() / f"{args.name}.jsonl", pan=args.pan, seed=args.seed,
+        swell_db=args.swell, swell_bars=args.swell_bars, swell_drift=args.swell_drift,
     )
-    return Voice(vs, cat, chooser, clock, bus, player)
+    render = render_from
+    if args.no_normalise:
+        render = functools.partial(render_from, target_lufs=None)
+    return Voice(vs, cat, chooser, clock, bus, player, render=render)
 
 
 async def _run_voice(args) -> None:
@@ -147,12 +178,12 @@ def cmd_voice(args) -> None:
 def _passthrough(args) -> list[str]:
     out = []
     for flag in ("loops", "anchor", "anchor_weight", "device", "volume", "sr", "prepare_bars",
-                 "max_shift", "max_stretch"):
-        v = getattr(args, flag)
+                 "max_shift", "max_stretch", "swell", "swell_drift"):
+        v = getattr(args, flag, None)
         if v is not None:
             out += [f"--{flag.replace('_', '-')}", str(v)]
-    for flag in ("commercial", "no_link", "dry_run"):
-        if getattr(args, flag):
+    for flag in ("commercial", "no_link", "dry_run", "no_normalise"):
+        if getattr(args, flag, False):
             out.append(f"--{flag.replace('_', '-')}")
     if args.peers:
         out += ["--peers", *args.peers]
@@ -161,8 +192,12 @@ def _passthrough(args) -> list[str]:
 
 def voice_commands(args) -> list[list[str]]:
     """One ``counterpoint voice`` command line per voice: names v1..vN, panned across
-    the stereo field, or each on its own channel pair with ``--spread-channels``."""
+    the stereo field, or each on its own channel pair with ``--spread-channels``. Each
+    gets its own swell period: from the ``--swell-bars`` list, or one value spread out."""
     n = args.voices
+    bars = list(getattr(args, "swell_bars", None) or [4.0])
+    if len(bars) == 1:
+        bars = [bars[0] * SWELL_SPREAD[i % len(SWELL_SPREAD)] for i in range(n)]
     base = [sys.executable, "-m", "counterpoint"]
     if args.config:
         base += ["--config", args.config]
@@ -171,7 +206,8 @@ def voice_commands(args) -> list[list[str]]:
     cmds = []
     for i in range(n):
         name = f"v{i + 1}"
-        cmd = [*base, "voice", "--name", name, *_passthrough(args)]
+        cmd = [*base, "voice", "--name", name, *_passthrough(args),
+               "--swell-bars", f"{bars[i % len(bars)]:g}"]
         if args.spread_channels:
             cmd += ["--channels", f"{2 * i + 1},{2 * i + 2}"]
         else:
@@ -190,7 +226,8 @@ def cmd_ensemble(args) -> None:
         return asyncio.run(_status(args.seconds, args.peers))
     if args.action == "set":
         if len(args.rest) != 2:
-            sys.exit("usage: counterpoint ensemble set anchor|tempo|volume|loops|stop VALUE")
+            sys.exit("usage: counterpoint ensemble set "
+                     "anchor|tempo|volume|swell|swell-bars|swell-drift|loops|stop VALUE")
         return _set(args.rest[0], args.rest[1], args.voice, args.peers)
     procs = [subprocess.Popen(c) for c in voice_commands(args)]
     print(f"started {len(procs)} voices; Ctrl-C stops them", file=sys.stderr)
@@ -212,7 +249,8 @@ def cmd_ensemble(args) -> None:
 
 
 def _set(key: str, value: str, voice: str | None, peers: list[str]) -> None:
-    if key not in ("anchor", "tempo", "volume", "loops", "stop"):
+    if key not in ("anchor", "tempo", "volume", "swell", "swell-bars", "swell-drift", "loops",
+                   "stop"):
         sys.exit(f"can't set {key!r}")
     bus = UdpBus(peers=peers)
     c = Control(key, value, voice)

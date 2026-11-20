@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from counterpoint.harmony import NOTES, Target, infer_scale, parse_chord, parse_scale
+from counterpoint.harmony import NOTES, Target, infer_scale, parse_chord, parse_scale, related
 
 
 def names(chord):
@@ -65,3 +65,15 @@ def test_inferred_scale(chord, scale):
 def test_chord_tones_always_in_scale():
     t = Target.from_chord(parse_chord("C7"), scale="C major")
     assert t.scale[NOTES.index("A#")] == 1.0
+
+
+def test_related_chords():
+    assert set(related("Am9")) == {"Dm9", "Em9", "Cmaj9"}
+    assert set(related("C")) == {"F", "G", "Am"}
+    assert set(related("Cmaj7")) == {"Fmaj7", "Gmaj7", "Am7"}
+    for text in ("Fmaj7#11", "C/G", "G7b9", "Bø", "Dsus4", "Bbmaj7"):
+        out = related(text)
+        assert len(out) >= 2
+        for c in out:
+            parse_chord(c)
+    assert "F/C" in related("C/G")

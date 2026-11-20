@@ -180,6 +180,46 @@ def parse_chord(text: str) -> Chord:
     return Chord(text.strip(), root, tones, bass)
 
 
+# Relative major/minor: a minor chord's suffix and the matching major one a minor third
+# up, keeping the chord's colour where there is an obvious equivalent.
+_RELATIVE_MAJOR = {"m": "", "min": "", "-": "", "m6": "6", "m7": "maj7", "min7": "maj7",
+                   "-7": "maj7", "m9": "maj9", "min9": "maj9", "-9": "maj9", "m11": "maj9",
+                   "madd9": "add9", "m69": "69"}
+_RELATIVE_MINOR = {"": "m", "M": "m", "maj": "m", "6": "m7", "maj7": "m7", "M7": "m7",
+                   "Δ7": "m7", "maj9": "m9", "M9": "m9", "add9": "madd9", "69": "m9",
+                   "6/9": "m9", "maj7#11": "m9"}
+
+
+def related(name: str) -> list[str]:
+    """Chords close to ``name``: the same chord a fourth and a fifth up, and its relative
+    major or minor where the suffix has an obvious counterpart. Only symbols that parse
+    are returned."""
+    m = _CHORD.match(name.strip())
+    if not m:
+        return []
+    root, suffix, bass = pitch_class(m.group(1)), m.group(2), m.group(3)
+    bass_pc = pitch_class(bass) if bass else None
+
+    def spell(r: int, s: str, b: int | None) -> str:
+        return NOTES[r % 12] + s + ("" if b is None else "/" + NOTES[b % 12])
+
+    out = [spell(root + 5, suffix, None if bass_pc is None else bass_pc + 5),
+           spell(root + 7, suffix, None if bass_pc is None else bass_pc + 7)]
+    if suffix in _RELATIVE_MAJOR:
+        out.append(spell(root + 3, _RELATIVE_MAJOR[suffix], None))
+    elif suffix in _RELATIVE_MINOR:
+        out.append(spell(root - 3, _RELATIVE_MINOR[suffix], None))
+    good = []
+    for c in out:
+        try:
+            parse_chord(c)
+        except ValueError:
+            continue
+        if c not in good:
+            good.append(c)
+    return good
+
+
 def _degree(n: int, acc: str | None) -> int:
     base = {2: 2, 4: 5, 6: 9, 9: 2, 11: 5, 13: 9, 5: 7, 3: 4, 7: 10}[n]
     return (base + (1 if acc == "#" else -1 if acc == "b" else 0)) % 12

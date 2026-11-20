@@ -8,10 +8,10 @@ import pytest
 
 from counterpoint.bus import CONTROL, Control, MemoryBus, Playing, VoiceState
 from counterpoint.catalogue import Catalogue
-from counterpoint.chooser import Chooser, Library, Role
+from counterpoint.chooser import AnchorWalk, Chooser, Library, Role
 from counterpoint.clock import FreeClock
 from counterpoint.ensemble_cli import format_status, voice_commands
-from counterpoint.harmony import NOTES
+from counterpoint.harmony import NOTES, related
 from counterpoint.player import NullPlayer
 from counterpoint.profile import ProfileCache, profiles_for
 from counterpoint.render import Loop, loop_beats
@@ -180,11 +180,13 @@ def test_control_messages(big_catalogue, cache_dir):
         for c in (Control("anchor", "Dm9"), Control("tempo", "120"),
                   Control("volume", "0.5", voice="v1"), Control("loops", "2-3"),
                   Control("volume", "0.1", voice="v9"), Control("swell", "0"),
-                  Control("swell-bars", "6", voice="v1"), Control("swell-drift", "0.3")):
+                  Control("swell-bars", "6", voice="v1"), Control("swell-drift", "0.3"),
+                  Control("anchor-bars", "50")):
             remote.send(CONTROL, c.to_json())
 
     asyncio.run(go())
     assert v.chooser.role.anchor == "Dm9"
+    assert v.anchor_walk.home == "Dm9" and v.anchor_walk.bars == 50 == v.s.anchor_bars
     assert clock.tempo == 120
     assert v.player.mixer.gain == 0.5  # the v9-only message didn't apply
     assert v.s.loops == (2, 3)
@@ -254,6 +256,7 @@ def test_voice_commands():
     class A:
         voices, textures, spread_channels, config, catalogue = 3, 1, False, None, "/data"
         loops, anchor, anchor_weight, device, volume, sr = "4-8", "Am9", 0.5, None, 0.8, 48000
+        anchor_bars = 100
         prepare_bars, max_shift, max_stretch, bpm = 2, None, None, 100.0
         commercial, no_link, dry_run, peers = False, False, True, []
 
@@ -261,6 +264,7 @@ def test_voice_commands():
     assert [c[c.index("--name") + 1] for c in cmds] == ["v1", "v2", "v3"]
     assert "--texture" in cmds[2] and "--texture" not in cmds[0]
     assert "--bpm" in cmds[0] and "--bpm" not in cmds[1]
+    assert cmds[0][cmds[0].index("--anchor-bars") + 1] == "100"
     assert cmds[0][cmds[0].index("--pan") + 1] == "-0.80"
     bars = [c[c.index("--swell-bars") + 1] for c in cmds]
     assert len(set(bars)) == 3  # each voice swells on its own period
@@ -298,3 +302,26 @@ def test_small_library_repeats_before_doubling(catalogue, cache_dir):
     others = [other("v1", ["A", "C", "E"], sid="a_minor")]
     pick = ch.choose(others, 96).match.sample.id
     assert pick != "a_minor"  # repeats one of its own rather than doubling v1
+
+
+def test_anchor_walk():
+    period = 10 * 4  # ten bars of 4/4
+    w = AnchorWalk("Am9", bars=10)
+    seq = [w.at(b) for b in range(0, 30 * period, 4)]
+    assert seq == [AnchorWalk("Am9", bars=10).at(b) for b in range(0, 30 * period, 4)]
+    assert all(c == "Am9" for c in seq[:10])
+    epochs = [seq[i * 10] for i in range(30)]
+    for i in range(30):  # constant within a period
+        assert set(seq[i * 10:(i + 1) * 10]) == {epochs[i]}
+    for a, b in zip(epochs, epochs[1:], strict=False):  # each step is to a related chord
+        assert b in related(a)
+    assert len(set(epochs)) > 2  # it wanders
+    # Asking out of order gives the same answers.
+    w2 = AnchorWalk("Am9", bars=10)
+    assert [w2.at(b) for b in reversed(range(0, 30 * period, 4))] == seq[::-1]
+    assert AnchorWalk("Am9", bars=0).at(10_000) == "Am9"
+    assert AnchorWalk(None).at(10_000) is None
+    # Restarting begins a new walk from the start of the current period.
+    w.restart("Dm9", 3 * period + 7)
+    assert w.origin_beat == 3 * period and w.at(3 * period) == "Dm9"
+    assert w.at(4 * period) in related("Dm9")

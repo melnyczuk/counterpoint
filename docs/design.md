@@ -211,6 +211,14 @@ with these differences:
   wanders freely. Each choice only has to fit the voices playing at that moment, so over
   many changes the ensemble can modulate. That's deliberate, and the anchor weight sets
   how much.
+- **Anchor walk**: the anchor itself moves every `--anchor-bars 100` bars (0: never) to
+  a related chord: the same chord a fourth or a fifth up, or its relative major or minor.
+  Each step builds on the last, so over a long run it can travel round the circle of
+  fifths. The chord is a function of the bar on the shared Link timeline, seeded from
+  the home chord and the step number, so voices agree without a leader. A voice uses
+  the chord for the bar its next sample starts on. `ensemble set anchor X` restarts the
+  walk from X at the start of the current period, and `set anchor-bars N` changes the
+  period, carrying on from the current chord.
 - **Novelty**: samples this voice played recently, and any sample another voice is
   playing, are excluded. A candidate from the same source recording as another voice's
   sample is penalised.

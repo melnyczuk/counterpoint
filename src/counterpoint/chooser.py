@@ -18,7 +18,8 @@ import numpy as np
 
 from .bus import Playing, VoiceState
 from .catalogue import Sample
-from .harmony import Target, parse_chord
+from .clock import BEATS_PER_BAR
+from .harmony import Target, parse_chord, related
 from .profile import Profile
 from .scoring import LAST_RESORT_SLOW, Limits, Match, Weights, score_sample, texture_match
 
@@ -47,6 +48,55 @@ class Role:
     novelty: int = 8  # this voice's own last N picks are excluded
     top_k: int = 5  # draw from this many best
     temperature: float = 0.05  # lower = more often the very best
+
+
+@dataclass
+class AnchorWalk:
+    """The anchor as a function of the bar: ``home`` until ``bars`` bars after
+    ``origin_beat``, then a step to a related chord every ``bars`` bars, wandering freely.
+
+    Each step is drawn from a seed made of the home chord, the origin and the step number,
+    so every voice on the same Link timeline computes the same walk without talking.
+    """
+
+    home: str | None
+    bars: int = 100  # 0 keeps the anchor fixed
+    origin_beat: float = 0.0
+
+    def __post_init__(self):
+        self._memo: tuple[int, str | None] = (0, self.home)
+
+    def epoch(self, beat: float) -> int:
+        if not self.bars:
+            return 0
+        return max(0, math.floor((beat - self.origin_beat + 1e-6)
+                                 / (self.bars * BEATS_PER_BAR)))
+
+    def epoch_start(self, beat: float) -> float:
+        return self.origin_beat + self.epoch(beat) * self.bars * BEATS_PER_BAR
+
+    def at(self, beat: float) -> str | None:
+        if not self.home or not self.bars:
+            return self.home
+        k = self.epoch(beat)
+        i, chord = self._memo
+        if k < i:
+            i, chord = 0, self.home
+        while i < k and chord:
+            i += 1
+            options = related(chord)
+            if options:
+                chord = random.Random(f"{self.home}:{self.origin_beat:g}:{i}").choice(options)
+        self._memo = (i, chord)
+        return chord
+
+    def restart(self, home: str | None, beat: float, bars: int | None = None) -> None:
+        """Start a new walk from ``home`` at the start of the period ``beat`` falls in."""
+        start = self.epoch_start(beat)
+        if bars is not None:
+            self.bars = max(0, bars)
+        self.home, self.origin_beat = home, start
+        self._memo = (0, home)
 
 
 @dataclass

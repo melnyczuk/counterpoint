@@ -34,7 +34,7 @@ from pathlib import Path
 
 from .bus import CONTROL, STATE, Control, Peers, Playing, VoiceState
 from .catalogue import Catalogue
-from .chooser import Choice, Chooser
+from .chooser import AnchorWalk, Choice, Chooser
 from .clock import BEATS_PER_BAR, Clock, next_bar, seconds_until, wait_until
 from .player import Swell
 from .render import Loop, loop_beats, render_from
@@ -67,6 +67,7 @@ class VoiceSettings:
     swell_tick_s: float = 0.05
     rest_bars: int = 1  # silent bars between samples when other voices are playing
     fade_ms: float = 200.0  # every sample fades in and out over this
+    anchor_bars: int = 100  # the anchor moves to a related chord this often; 0: never
     extra: dict = field(default_factory=dict)
 
 
@@ -96,6 +97,7 @@ class Voice:
         self._swell_beat: float | None = None  # where the swell has been advanced to
         self._next_wrap: float | None = None  # the current loop's next loop point
         self._loop_beats: float | None = None
+        self.anchor_walk = AnchorWalk(chooser.role.anchor, settings.anchor_bars)
 
     # -- messages ---------------------------------------------------------------------
 
@@ -124,7 +126,13 @@ class Voice:
             return
         self._controls_seen.add(c.id)
         if c.set == "anchor":
-            self.chooser.role.anchor = None if c.value.lower() in ("", "none") else c.value
+            anchor = None if c.value.lower() in ("", "none") else c.value
+            self.anchor_walk.restart(anchor, self.clock.beat)
+            self.chooser.role.anchor = anchor
+        elif c.set == "anchor-bars":
+            beat = self.clock.beat
+            self.s.anchor_bars = max(0, int(c.value))
+            self.anchor_walk.restart(self.anchor_walk.at(beat), beat, self.s.anchor_bars)
         elif c.set == "tempo":
             self.clock.tempo = float(c.value)
         elif c.set == "volume":
@@ -253,6 +261,11 @@ class Voice:
 
     async def prepare(self, change: float) -> tuple[Choice, Loop]:
         await self._wait_turn(change)
+        anchor = self.anchor_walk.at(change)
+        if anchor != self.chooser.role.anchor:
+            log.info("%s: anchor %s -> %s from bar %d", self.s.name, self.chooser.role.anchor,
+                     anchor, int(change // BEATS_PER_BAR) + 1)
+            self.chooser.role.anchor = anchor
         tempo = self.clock.tempo
         choice = self.chooser.choose(self.peers.live(), tempo)
         m = choice.match

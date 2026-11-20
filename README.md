@@ -90,6 +90,7 @@ counterpoint ensemble --voices 5 --textures 1               # one of them plays 
 counterpoint voice --name low --band low --loops 6          # a single voice (one per Pi)
 counterpoint ensemble status                                # who's playing what, next change
 counterpoint ensemble set anchor Dm9                        # every voice, from its next pick
+counterpoint ensemble set anchor-bars 50                    # move the anchor every 50 bars
 counterpoint ensemble set volume 0.5 --voice v2
 counterpoint ensemble --voices 4 --swell-bars 3,4,5,7     # each voice swells on its own period
 counterpoint ensemble set swell 0                           # hold every voice's level steady
@@ -102,6 +103,10 @@ counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
   against the other voices' combined profile (their announced next picks where there
   are any), plus the input and `--anchor`. It draws from the best few and announces its
   pick.
+- **Anchor walk:** every 100 bars (`--anchor-bars`, 0 keeps it fixed) the anchor steps
+  to a related chord: the same chord a fourth or fifth up, or its relative major or minor
+  (`Am9` → `Dm9`, `Em9` or `Cmaj9`). It wanders freely from there. Each step is seeded
+  from the bar number, so every voice on the Link session moves together.
 - **Playing:** the pick is shifted and stretched in memory with Rubber Band, so the loop
   lasts a whole number of beats at the session tempo. It fades in on its bar over
   `--fade-ms 200`. Nothing is written to disk.

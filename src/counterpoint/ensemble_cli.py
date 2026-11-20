@@ -5,6 +5,7 @@
     counterpoint ensemble --catalogue ~/winnower/data    # ... reading this catalogue
     counterpoint ensemble status                         # who's playing what
     counterpoint ensemble set anchor Dm9                 # steer every voice
+    counterpoint ensemble set anchor-bars 50             # move the anchor every 50 bars
     counterpoint ensemble set volume 0.5 --voice v2
     counterpoint ensemble set swell-bars 6 --voice v3     # a slower swell for one voice
     counterpoint ensemble set rest 2                     # two silent bars between samples
@@ -79,6 +80,8 @@ def add_voice_args(p: argparse.ArgumentParser, single: bool = True) -> None:
     p.add_argument("--loops", default="4-8", help="loops before changing: 6 or 4-8")
     p.add_argument("--anchor", help="chord pulling the harmony back, e.g. Am9")
     p.add_argument("--anchor-weight", type=float, default=0.5)
+    p.add_argument("--anchor-bars", type=int, default=100,
+                   help="bars before the anchor moves to a related chord (0: keep it fixed)")
     p.add_argument("--bpm", type=float, help="set the session tempo")
     p.add_argument("--device", help="output device name or number")
     p.add_argument("--volume", type=float, default=0.8)
@@ -150,7 +153,7 @@ def _make_voice(args, bus=None, clock=None, player=None) -> Voice:
         prepare_beats=args.prepare_bars * BEATS_PER_BAR,
         log_path=args.log or state_dir() / f"{args.name}.jsonl", pan=args.pan, seed=args.seed,
         swell_db=args.swell, swell_bars=args.swell_bars, swell_drift=args.swell_drift,
-        rest_bars=args.rest_bars, fade_ms=args.fade_ms,
+        rest_bars=args.rest_bars, fade_ms=args.fade_ms, anchor_bars=args.anchor_bars,
     )
     render = render_from
     if args.no_normalise:
@@ -189,9 +192,9 @@ def cmd_voice(args) -> None:
 
 def _passthrough(args) -> list[str]:
     out = []
-    for flag in ("loops", "anchor", "anchor_weight", "device", "volume", "sr", "prepare_bars",
-                 "max_shift", "max_stretch", "max_slow", "swell", "swell_drift", "rest_bars",
-                 "fade_ms"):
+    for flag in ("loops", "anchor", "anchor_weight", "anchor_bars", "device", "volume", "sr",
+                 "prepare_bars", "max_shift", "max_stretch", "max_slow", "swell", "swell_drift",
+                 "rest_bars", "fade_ms"):
         v = getattr(args, flag, None)
         if v is not None:
             out += [f"--{flag.replace('_', '-')}", str(v)]
@@ -240,7 +243,8 @@ def cmd_ensemble(args) -> None:
     if args.action == "set":
         if len(args.rest) != 2:
             sys.exit("usage: counterpoint ensemble set "
-                     "anchor|tempo|volume|swell|swell-bars|swell-drift|rest|fade|loops|stop VALUE")
+                     "anchor|anchor-bars|tempo|volume|swell|swell-bars|swell-drift|rest|fade|"
+                     "loops|stop VALUE")
         return _set(args.rest[0], args.rest[1], args.voice, args.peers)
     # Analyse once here so the voices start with a warm cache instead of all analysing
     # (and saving) the same samples at once.
@@ -267,8 +271,8 @@ def cmd_ensemble(args) -> None:
 
 
 def _set(key: str, value: str, voice: str | None, peers: list[str]) -> None:
-    if key not in ("anchor", "tempo", "volume", "swell", "swell-bars", "swell-drift", "rest",
-                   "fade", "loops", "stop"):
+    if key not in ("anchor", "anchor-bars", "tempo", "volume", "swell", "swell-bars",
+                   "swell-drift", "rest", "fade", "loops", "stop"):
         sys.exit(f"can't set {key!r}")
     bus = UdpBus(peers=peers)
     c = Control(key, value, voice)

@@ -212,17 +212,24 @@ with these differences:
   (noise, rain, crackle). Its choice is based on tempo, band and novelty only.
 
 A standalone voice pitch-shifts and time-stretches the chosen sample **in memory** during
-the last loop, and the new buffer starts on the bar where the change falls, with a short
-crossfade. An Ableton voice hands the shift and stretch to Ableton instead (see Sound
+the last loop, and the new buffer fades in on the bar where the change falls. The
+previous sample has already faded out, by the bar line after its last loop, and the
+voice has rested at least a bar in between (a voice playing alone crossfades straight
+into its next sample instead). An Ableton voice hands the shift and stretch to Ableton instead (see Sound
 output). Either way nothing is written to disk, and winnower's files are never changed.
 
 ### Avoiding clashes
 
-Two voices that change on the same bar could pick samples that clash with each other.
-Voices that change on the same bar choose one at a time, in name order, and each one
-announces its pick before the next voice chooses. Each pick then takes the earlier ones
-into account. On a local network this takes milliseconds, well within the one loop of
-preparation time. If a voice stops sending for a few bars, the others drop it.
+No two voices start a sample on the same bar, so entries are staggered and each one is
+heard. A voice claims its next start bar as soon as it knows when its current sample
+ends, skipping bars other voices have already claimed. If two voices claim the same bar
+at once, the one that has already locked it (it is inside its preparation window) keeps
+it; otherwise the earlier name does, and the other moves on to the next free bar.
+
+Each choice takes the other voices' announced next picks into account. As a fallback,
+voices that still end up starting on the same bar choose one at a time, in name order,
+each announcing its pick before the next chooses. If a voice stops sending for a few
+bars, the others drop it.
 
 ### Sound output
 

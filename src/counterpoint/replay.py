@@ -3,7 +3,8 @@
 Each log line says which sample a voice started on which beat, with what shift, at what
 tempo and pan, and for how many loops. Replaying renders each one again (from the
 untouched catalogue files), at the same matched loudness, and lays it on a timeline until
-that voice's next entry, with the voice's swell drawn again from the same seeds.
+that voice's next entry (or until it faded out, where it rested in between), with the
+voice's swell drawn again from the same seeds and the same fades in and out.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ class Entry:
     swell_bars: float = 4.0
     swell_drift: float = 0.0
     swell_phase: float = 0.0
+    end_beat: float | None = None  # where it had faded out by; None: it played on
+    fade_ms: float = 10.0  # older logs: the old 10 ms crossfade
 
 
 def read_logs(paths: list[Path]) -> list[Entry]:
@@ -50,7 +53,8 @@ def read_logs(paths: list[Path]) -> list[Entry]:
             out.append(Entry(d["voice"], d["beat"], d["tempo"], d["catalogue"], d["shift"],
                              d.get("ratio"), d["loop_beats"], d["loops"], d.get("pan", 0.0),
                              d.get("swell_db", 0.0), d.get("swell_bars", 4.0),
-                             d.get("swell_drift", 0.0), d.get("swell_phase", 0.0)))
+                             d.get("swell_drift", 0.0), d.get("swell_phase", 0.0),
+                             d.get("end_beat"), d.get("fade_ms", 10.0)))
     return sorted(out, key=lambda e: (e.beat, e.voice))
 
 
@@ -84,6 +88,19 @@ def swell_curve(e: Entry, frames: int, frames_per_beat: float) -> np.ndarray:
     return out
 
 
+def fades(frames: int, fade_in: int, fade_out: int) -> np.ndarray:
+    """A linear fade in over the first ``fade_in`` frames and out over the last
+    ``fade_out`` (0 for none), as the player does."""
+    env = np.ones(frames, dtype=np.float32)
+    k = min(fade_in, frames)
+    if k > 0:
+        env[:k] = np.arange(k) / fade_in
+    k = min(fade_out, frames)
+    if k > 0:
+        env[frames - k:] *= 1 - (np.arange(k) + 1) / fade_out
+    return env
+
+
 def mixdown(entries: list[Entry], sr: int = 48000, open_file=None) -> np.ndarray:
     """A (2, frames) mix of the run. Tempo is taken per entry; beats are converted at
     the first entry's tempo so the timeline lines up with the logged beats."""
@@ -102,18 +119,24 @@ def mixdown(entries: list[Entry], sr: int = 48000, open_file=None) -> np.ndarray
     spans = []
     for es in by_voice.values():
         for i, e in enumerate(es):
-            end = es[i + 1].beat if i + 1 < len(es) else e.beat + max(
-                BEATS_PER_BAR, e.loops * e.loop_beats)
-            spans.append((e, frame(e.beat), frame(end)))
-    out = np.zeros((2, max(b for _, _, b in spans)), dtype=np.float32)
-    for e, a, b in spans:
+            fade = max(1, int(sr * e.fade_ms / 1000))
+            if e.end_beat is not None:  # faded out by its end, then rested
+                a, b = frame(e.beat), frame(e.end_beat)
+            elif i + 1 < len(es):  # fades out under the next one fading in
+                a, b = frame(e.beat), frame(es[i + 1].beat) + fade
+            else:
+                a, b = frame(e.beat), frame(e.beat + max(BEATS_PER_BAR, e.loops * e.loop_beats))
+            spans.append((e, a, b, fade))
+    out = np.zeros((2, max(b for _, _, b, _ in spans)), dtype=np.float32)
+    for e, a, b, fade in spans:
         with open_file(e.path) as f:
             y, src_sr = load_audio(f.read())
         m = _match_for(e)
         audio = render(y, src_sr, m.sample, m, e.tempo, sr, beats=e.loop_beats).audio
         n = b - a
         reps = int(np.ceil(n / audio.shape[1]))
-        seg = np.tile(audio, (1, reps))[:, :n] * swell_curve(e, n, spb)
+        env = swell_curve(e, n, spb) * fades(n, fade, fade)
+        seg = np.tile(audio, (1, reps))[:, :n] * env
         lg, rg = pan_gains(e.pan)
         out[0, a:b] += seg[0] * lg
         out[1, a:b] += seg[1] * rg

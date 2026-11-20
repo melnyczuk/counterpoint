@@ -101,3 +101,35 @@ def test_mixer_ramps_the_swell():
     assert out[-1] == pytest.approx(0.5)
     assert np.all(np.diff(out) <= 0) and np.abs(np.diff(out)).max() < 0.01
     assert np.allclose(m.block(10)[0] / pan_gains(0)[0], 0.5)
+
+
+def test_start_fades_in_from_silence():
+    m = Mixer(1000)
+    m.fade_frames = 20
+    m.schedule(ramp_loop(value=1.0), 10)
+    out = m.block(50)[0] / pan_gains(0)[0]
+    assert np.all(out[:10] == 0)
+    assert out[10] == pytest.approx(0.0, abs=1e-6)
+    assert np.all(np.diff(out[10:30]) > 0)  # rising through the fade
+    assert np.allclose(out[30:], 1.0)
+
+
+def test_stop_then_rest_then_start_in_one_block():
+    m = Mixer(1000)
+    m.fade_frames = 10
+    m.schedule(ramp_loop(value=1.0), 0)
+    m.stop(40)  # fades out over 40..50
+    m.schedule(ramp_loop(value=-1.0), 70)  # rests 50..70, then fades in
+    out = m.block(100)[0] / pan_gains(0)[0]
+    assert np.allclose(out[10:40], 1.0)
+    assert np.all(np.diff(out[40:50]) < 0) and out[49] < 0.2
+    assert np.all(out[50:70] == 0)
+    assert np.all(np.diff(out[70:80]) < 0)  # falling towards -1 from silence
+    assert np.allclose(out[80:], -1.0)
+
+
+def test_fade_ms():
+    m = Mixer(48000, fade_ms=200)
+    assert m.fade_frames == 9600
+    m.fade_ms = 0
+    assert m.fade_frames == 1

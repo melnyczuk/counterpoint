@@ -91,6 +91,7 @@ counterpoint ensemble set anchor Dm9                        # every voice, from 
 counterpoint ensemble set volume 0.5 --voice v2
 counterpoint ensemble --voices 4 --swell-bars 3,4,5,7     # each voice swells on its own period
 counterpoint ensemble set swell 0                           # hold every voice's level steady
+counterpoint ensemble --voices 4 --rest-bars 2 --fade-ms 400  # longer rests and fades
 counterpoint listen --midi                                  # a keyboard player joins as a voice
 counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
 ```
@@ -98,10 +99,10 @@ counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
 - **Picking:** two bars before its change (`--prepare-bars`), a voice scores the library
   against the other voices' combined profile (their announced next picks where there
   are any), plus the input and `--anchor`. It draws from the best few and announces its
-  pick. Voices changing on the same bar pick one at a time, in name order.
+  pick.
 - **Playing:** the pick is shifted and stretched in memory with Rubber Band, so the loop
-  lasts a whole number of beats at the session tempo. It starts on the bar with a 10 ms
-  crossfade. Nothing is written to disk.
+  lasts a whole number of beats at the session tempo. It fades in on its bar over
+  `--fade-ms 200`. Nothing is written to disk.
 - **Levels:** every loop is brought to -20 LUFS (BS.1770 loudness, ignoring silences)
   before it plays, so a hot sample doesn't bury the others. Quiet ones are boosted by at
   most 12 dB, and peaks stay under 0.9. `--no-normalise` plays loops at their own level.
@@ -110,8 +111,13 @@ counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
   loop, so the voices phase against each other and each one comes to the fore now and
   then. `ensemble` gives each voice a slightly different period, or takes a list. Change
   them live with `set swell|swell-bars|swell-drift VALUE [--voice vN]`.
-- **Loops:** `--loops 4-8` draws a new count each time. The change lands on the next bar
-  line after that many loops.
+- **Loops:** `--loops 4-8` draws a new count each time. The sample fades out so it's
+  silent by the next bar line after that many loops.
+- **Rests and staggered starts:** with other voices playing, a voice rests at least
+  `--rest-bars 1` bars before its next sample, and no two voices start a sample on the
+  same bar: a voice claims its start bar when it schedules it, and moves to the next free
+  one if another voice got there first. A voice on its own doesn't rest; its next sample
+  crossfades in. Change them live with `set rest|fade VALUE [--voice vN]`.
 - **Sync:** Ableton (Live 11+) joins the same Link session if Link is on in its
   preferences. Use `--no-link` for local time, and `--peers host:port` where the network
   blocks multicast.

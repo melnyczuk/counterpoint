@@ -19,7 +19,7 @@ import numpy as np
 
 from .render import Loop
 
-FADE_MS = 10.0
+FADE_MS = 200.0  # every sample fades in and out over this
 
 
 def pan_gains(pan: float) -> tuple[float, float]:
@@ -63,10 +63,13 @@ class _Voice:
 
 
 class Mixer:
-    """Plays one loop; a scheduled loop takes over at an exact frame with a short
-    crossfade. Thread-safe between the audio callback and the scheduler."""
+    """Plays one loop at a time. Starts and stops are queued at exact frames; each one
+    fades over ``fade_ms``: a start fades in (from silence, or crossfading from the loop
+    before), a stop fades out to silence. Thread-safe between the audio callback and the
+    scheduler."""
 
-    def __init__(self, sr: int, pan: float = 0.0, gain: float = 1.0):
+    def __init__(self, sr: int, pan: float = 0.0, gain: float = 1.0,
+                 fade_ms: float = FADE_MS):
         self.sr = sr
         self.pan = pan
         self.gain = gain
@@ -75,22 +78,36 @@ class Mixer:
         self._cur: _Voice | None = None
         self._out: _Voice | None = None  # fading out
         self._fade_left = 0
-        self._pending: tuple[Loop | None, int, int] | None = None  # loop, start, offset
+        self._events: list[tuple[int, Loop | None, int]] = []  # frame, loop, offset
         self._lock = threading.Lock()
         self.frame = 0  # frames output so far
-        self.fade_frames = max(1, int(sr * FADE_MS / 1000))
+        self.fade_ms = fade_ms
         self.started: list[tuple[int, Loop]] = []
+
+    @property
+    def fade_ms(self) -> float:
+        return self.fade_frames * 1000 / self.sr
+
+    @fade_ms.setter
+    def fade_ms(self, ms: float) -> None:
+        self.fade_frames = max(1, int(self.sr * max(0.0, ms) / 1000))
+
+    def _queue(self, at_frame: int, loop: Loop | None, offset: int) -> None:
+        self._events.append((at_frame, loop, offset))
+        self._events.sort(key=lambda e: e[0])
 
     def schedule(self, loop: Loop, at_frame: int) -> None:
         """Start ``loop`` at ``at_frame``. If that's already past (a late render), start
         now, part-way in, so the loop stays in phase with the bar lines."""
         with self._lock:
             late = max(0, self.frame - at_frame)
-            self._pending = (loop, max(at_frame, self.frame), late)
+            self._queue(max(at_frame, self.frame), loop, late)
 
     def stop(self, at_frame: int | None = None) -> None:
+        """Fade out to silence starting at ``at_frame`` (now if None or already past)."""
         with self._lock:
-            self._pending = (None, self.frame if at_frame is None else at_frame, 0)
+            self._queue(self.frame if at_frame is None else max(at_frame, self.frame),
+                        None, 0)
 
     def _read(self, v: _Voice, n: int) -> np.ndarray:
         L = v.loop.frames
@@ -102,17 +119,18 @@ class Mixer:
         """The next ``n`` frames, stereo (2, n)."""
         out = np.zeros((2, n), dtype=np.float32)
         with self._lock:
-            pending = self._pending
             start = 0
-            if pending is not None and pending[1] < self.frame + n:
-                split = pending[1] - self.frame
-                self._render(out, 0, split)
+            while self._events and self._events[0][0] < self.frame + n:
+                at, loop, offset = self._events.pop(0)
+                split = max(start, at - self.frame)
+                self._render(out, start, split)
+                if loop is None and self._cur is None:
+                    start = split
+                    continue  # already silent
                 self._out, self._fade_left = self._cur, self.fade_frames
-                loop, _, offset = pending
                 self._cur = None if loop is None else _Voice(loop, offset % loop.frames)
-                if pending[0] is not None:
-                    self.started.append((pending[1], pending[0]))
-                self._pending = None
+                if loop is not None:
+                    self.started.append((at, loop))
                 start = split
             self._render(out, start, n)
             self.frame += n
@@ -148,10 +166,11 @@ class DevicePlayer:
     left and right go to, e.g. (3, 4); a single channel gets a mono sum."""
 
     def __init__(self, sr: int = 48000, device=None, channels: tuple[int, ...] = (1, 2),
-                 pan: float = 0.0, gain: float = 1.0, blocksize: int = 512):
+                 pan: float = 0.0, gain: float = 1.0, blocksize: int = 512,
+                 fade_ms: float = FADE_MS):
         import sounddevice as sd
 
-        self.mixer = Mixer(sr, pan, gain)
+        self.mixer = Mixer(sr, pan, gain, fade_ms)
         self.channels = channels
         self._stream = sd.OutputStream(
             samplerate=sr, device=device, channels=max(channels), dtype="float32",
@@ -185,10 +204,11 @@ class NullPlayer:
     """No sound card: the mixer runs on a timer so scheduling behaves the same. Used for
     tests, dry runs and headless checks."""
 
-    def __init__(self, sr: int = 48000, pan: float = 0.0, gain: float = 1.0):
+    def __init__(self, sr: int = 48000, pan: float = 0.0, gain: float = 1.0,
+                 fade_ms: float = FADE_MS):
         import time
 
-        self.mixer = Mixer(sr, pan, gain)
+        self.mixer = Mixer(sr, pan, gain, fade_ms)
         self._t0 = time.monotonic()
         self._time = time.monotonic
 

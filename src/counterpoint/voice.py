@@ -1,13 +1,19 @@
 """One voice of an ensemble: plays a loop, and every few loops picks a new one that fits
 with what the other voices are playing.
 
-Timeline for one change at beat ``B`` (always a bar line):
+Timeline for one sample starting at beat ``B`` (always a bar line):
 
-1. at ``B - prepare`` it waits its turn (voices changing on the same bar pick one at a
-   time, in name order), picks, and announces the pick so later pickers fit with it;
-2. renders the pick in memory (a worker thread) and schedules it for ``B``;
-3. at ``B`` the new loop takes over with a short crossfade; the voice draws how many
-   loops to play this time and announces its next change.
+1. until ``B - prepare`` the start bar may still move: no two voices start on the same
+   bar, so if another voice claims it first (or at the same moment, with an earlier
+   name), this voice moves to the next free bar. Then it locks the bar and announces;
+2. it picks (waiting its turn if another voice somehow starts on the same bar) and
+   announces the pick so later pickers fit with it;
+3. renders the pick in memory (a worker thread) and schedules it for ``B``;
+4. at ``B`` the new loop fades in. The voice draws how many loops to play, schedules a
+   fade out that ends on the bar line ``E`` after them, and claims the first free bar at
+   least ``rest_bars`` after ``E`` for its next sample. Between them it is silent.
+
+A voice alone in the ensemble doesn't rest: its next sample crossfades in at ``E``.
 
 All the while, the voice's level swells slowly on its own period (see
 :class:`~counterpoint.player.Swell`), redrawn a little differently every loop.
@@ -59,6 +65,8 @@ class VoiceSettings:
     swell_bars: float = 4.0  # this voice's swell period, before drift
     swell_drift: float = 0.15  # how far the period wanders each loop, as a fraction
     swell_tick_s: float = 0.05
+    rest_bars: int = 1  # silent bars between samples when other voices are playing
+    fade_ms: float = 200.0  # every sample fades in and out over this
     extra: dict = field(default_factory=dict)
 
 
@@ -78,6 +86,8 @@ class Voice:
         self.now: Playing | None = None
         self.next: Playing | None = None
         self.change_beat: float | None = None
+        self.change_locked = False
+        self.end_beat: float | None = None
         self._controls_seen: set[str] = set()
         self._stop = asyncio.Event()
         self.changes = 0
@@ -93,6 +103,7 @@ class Voice:
         return VoiceState(
             name=self.s.name, beat=round(self.clock.beat, 3), tempo=self.clock.tempo,
             now=self.now, next=self.next, change_beat=self.change_beat,
+            change_locked=self.change_locked, end_beat=self.end_beat,
             texture=self.chooser.role.texture, band=self.chooser.role.band,
         )
 
@@ -125,6 +136,10 @@ class Voice:
             self.swell.base_beats = self.s.swell_bars * BEATS_PER_BAR
         elif c.set == "swell-drift":
             self.swell.drift = self.s.swell_drift = max(0.0, min(0.9, float(c.value)))
+        elif c.set == "rest":
+            self.s.rest_bars = max(0, int(c.value))
+        elif c.set == "fade":
+            self.player.mixer.fade_ms = self.s.fade_ms = max(0.0, float(c.value))
         elif c.set == "loops":
             self.s.loops = parse_loops(c.value)
         elif c.set == "stop":
@@ -168,6 +183,58 @@ class Voice:
             self._swell_to(self.clock.beat)
             await asyncio.sleep(self.s.swell_tick_s)
 
+    # -- claiming start bars ------------------------------------------------------------
+
+    def _others(self):
+        return [p for p in self.peers.live() if not p.is_input]
+
+    def _claimed(self) -> list[float]:
+        return [p.change_beat for p in self._others() if p.change_beat is not None]
+
+    def _free_bar(self, earliest: float) -> float:
+        """The first bar line at or after ``earliest`` no other voice starts on."""
+        bar = math.ceil(earliest / BEATS_PER_BAR - 1e-6) * BEATS_PER_BAR
+        claimed = self._claimed()
+        while any(abs(c - bar) < 0.01 for c in claimed):
+            bar += BEATS_PER_BAR
+        return bar
+
+    def _settle(self) -> None:
+        """If another voice starts on our bar too, the one that has locked it keeps it;
+        if neither has, the earlier name does. The other moves on to a free bar."""
+        if self.change_locked or self.change_beat is None:
+            return
+        change = self.change_beat
+        rivals = [p for p in self._others() if p.change_beat is not None
+                  and abs(p.change_beat - change) < 0.01
+                  and (p.change_locked or p.name < self.s.name)]
+        if rivals:
+            self.change_beat = self._free_bar(change + BEATS_PER_BAR)
+            log.debug("%s: bar %d is taken by %s; moving to bar %d", self.s.name,
+                      int(change // BEATS_PER_BAR) + 1, rivals[0].name,
+                      int(self.change_beat // BEATS_PER_BAR) + 1)
+            self.announce()
+
+    async def _settle_until_locked(self) -> float:
+        """Keep the start bar clear of other voices' until it's time to prepare, then
+        lock it."""
+        while True:
+            self._settle()
+            left = seconds_until(self.clock, self.change_beat - self.s.prepare_beats)
+            if left <= 0.002:
+                break
+            await asyncio.sleep(min(left, self.s.heartbeat_s, 0.05))
+        self._settle()
+        self.change_locked = True
+        self.announce()
+        return self.change_beat
+
+    async def _fall_silent(self, end: float) -> None:
+        await wait_until(self.clock, end)
+        if self.end_beat == end:
+            self.now = None
+            self.announce()
+
     # -- choosing ---------------------------------------------------------------------
 
     async def _wait_turn(self, change: float) -> None:
@@ -204,41 +271,59 @@ class Voice:
         await self.bus.start(self._on_message)
         hb = asyncio.create_task(self._heartbeat())
         sw = asyncio.create_task(self._swell_loop())
+        silent: asyncio.Task | None = None
+        mixer = self.player.mixer
+        mixer.fade_ms = self.s.fade_ms
         try:
-            change = next_bar(self.clock.beat + self.s.prepare_beats)
-            self.change_beat = change
+            self.change_beat = self._free_bar(next_bar(self.clock.beat + self.s.prepare_beats))
+            self.announce()
             while not self._stop.is_set() and (changes is None or self.changes < changes):
-                await wait_until(self.clock, change - self.s.prepare_beats)
+                change = await self._settle_until_locked()
                 choice, loop = await self.prepare(change)
                 frame = self.player.frame_in(seconds_until(self.clock, change))
-                self.player.mixer.schedule(loop, frame)
+                mixer.schedule(loop, frame)
                 await wait_until(self.clock, change)
                 self._start_loop(change, loop.beats)
                 n = self.rng.randint(*self.s.loops)
                 self.now, self.next = self.next, None
                 self.now.loop_beats = loop.beats
-                nxt = change + math.ceil(n * loop.beats / BEATS_PER_BAR) * BEATS_PER_BAR
-                self.change_beat = nxt
+                end = change + math.ceil(n * loop.beats / BEATS_PER_BAR) * BEATS_PER_BAR
+                rests = bool(self._others()) and self.s.rest_bars > 0
+                if rests:
+                    # Fade out so it's silent by the bar line, then rest.
+                    fade_s = mixer.fade_frames / mixer.sr
+                    mixer.stop(self.player.frame_in(seconds_until(self.clock, end) - fade_s))
+                    nxt = self._free_bar(end + self.s.rest_bars * BEATS_PER_BAR)
+                else:
+                    nxt = self._free_bar(end)  # alone: crossfade straight into the next
+                self.end_beat, self.change_beat, self.change_locked = end, nxt, False
                 self.announce()
-                self._log(change, choice, loop, n)
+                if silent:
+                    silent.cancel()
+                if rests:
+                    silent = asyncio.create_task(self._fall_silent(end))
+                self._log(change, choice, loop, n, end if rests else None)
                 self.changes += 1
-                change = nxt
         finally:
             self._stop.set()
             hb.cancel()
             sw.cancel()
+            if silent:
+                silent.cancel()
 
     def stop(self) -> None:
         self._stop.set()
 
-    def _log(self, beat: float, choice: Choice, loop: Loop, loops: int) -> None:
+    def _log(self, beat: float, choice: Choice, loop: Loop, loops: int,
+             end: float | None) -> None:
         m = choice.match
         entry = {
             "t": round(time.time(), 3), "voice": self.s.name, "beat": beat,
             "tempo": loop.tempo, "id": m.sample.id, "file": m.sample.file,
             "catalogue": self.catalogue.path(m.sample), "shift": m.shift,
             "ratio": None if m.stretch is None else m.stretch.ratio,
-            "loop_beats": loop.beats, "loops": loops, "reference": choice.reference,
+            "loop_beats": loop.beats, "loops": loops, "end_beat": end,
+            "fade_ms": round(self.player.mixer.fade_ms, 1), "reference": choice.reference,
             "anchor": self.chooser.role.anchor, "pan": self.s.pan,
             "score": round(m.score, 4), "gain_db": round(loop.gain_db, 2),
             "swell_db": self.swell.depth_db, "swell_bars": self.s.swell_bars,

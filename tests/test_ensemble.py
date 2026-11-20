@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import random
 
 import numpy as np
@@ -108,6 +109,62 @@ def test_four_voices(big_catalogue, cache_dir, tmp_path):
     for e in logs:
         assert e["reference"]
         assert e["swell_db"] == 6.0 and 0 <= e["swell_phase"] < 1
+    # No two voices start a sample on the same bar.
+    starts = [e["beat"] for e in logs]
+    assert len(starts) == len(set(starts))
+    # Each voice fades out by a bar line and rests at least a bar before the next.
+    for i in range(4):
+        mine = [e for e in logs if e["voice"] == f"v{i + 1}"]
+        for e, nxt in zip(mine, mine[1:], strict=False):
+            assert e["end_beat"] % 4 == 0 and e["end_beat"] > e["beat"]
+            assert nxt["beat"] >= e["end_beat"] + 4
+            assert e["fade_ms"] == pytest.approx(200, abs=0.2)
+
+
+def test_a_lone_voice_does_not_rest(big_catalogue, cache_dir, tmp_path):
+    cat, lib = library(big_catalogue, cache_dir)
+    vs = VoiceSettings("v1", loops=(1, 2), prepare_beats=4, heartbeat_s=0.02,
+                       turn_wait_s=0.05, log_path=tmp_path / "v1.jsonl", seed=0)
+    v = Voice(vs, cat, Chooser(lib, rng=random.Random(0)), FreeClock(bpm=1200),
+              MemoryBus(MemoryBus.Hub()), NullPlayer(8000), render=fake_render)
+    asyncio.run(asyncio.wait_for(v.run(changes=3), 30))
+    logs = [json.loads(line) for line in (tmp_path / "v1.jsonl").read_text().splitlines()]
+    assert all(e["end_beat"] is None for e in logs)  # crossfades, no rest
+    for e, nxt in zip(logs, logs[1:], strict=False):
+        assert nxt["beat"] == e["beat"] + math.ceil(e["loops"] * e["loop_beats"] / 4) * 4
+
+
+def claim(name, bar, locked=False):
+    return VoiceState(name, 0, 96, change_beat=bar, change_locked=locked)
+
+
+def test_two_voices_claiming_one_bar(big_catalogue, cache_dir):
+    cat, lib = library(big_catalogue, cache_dir)
+
+    def voice(name):
+        v = Voice(VoiceSettings(name), cat, Chooser(lib), FreeClock(96),
+                  MemoryBus(MemoryBus.Hub()), NullPlayer(8000))
+        v.change_beat = 32.0
+        return v
+
+    v1, v2 = voice("v1"), voice("v2")
+    v1.peers.update(claim("v2", 32.0))
+    v2.peers.update(claim("v1", 32.0))
+    v1._settle()
+    v2._settle()
+    assert v1.change_beat == 32.0  # the earlier name keeps it
+    assert v2.change_beat == 36.0
+    # A voice that has locked its bar keeps it, whatever its name.
+    v1.peers.update(claim("v2", 32.0, locked=True))
+    v1._settle()
+    assert v1.change_beat == 36.0
+    # Moving skips bars other voices have claimed, and so does a fresh claim.
+    v3 = voice("v3")
+    for name, bar in (("v1", 32.0), ("v2", 36.0), ("v4", 40.0)):
+        v3.peers.update(claim(name, bar))
+    v3._settle()
+    assert v3.change_beat == 44.0
+    assert v3._free_bar(33.0) == 44.0 and v3._free_bar(45.0) == 48.0
 
 
 def test_control_messages(big_catalogue, cache_dir):
@@ -170,7 +227,17 @@ def test_replay_mixdown(big_catalogue, tmp_path):
     log.write_text("\n".join(json.dumps(e) for e in entries))
     swelled = mixdown(read_logs([log]), sr=8000)
     assert not np.allclose(swelled, mix)
-
+    # A voice that fades out by its end_beat rests in silence until its next entry.
+    v1 = dict(entries[0], swell_db=0.0, pan=-1.0, end_beat=4, fade_ms=100)
+    log.write_text("\n".join(json.dumps(e) for e in (v1, dict(v1, beat=12, end_beat=None))))
+    left = mixdown(read_logs([log]), sr=8000)[0]  # 4000 frames a beat
+    body = np.abs(left[4000:12000]).max()
+    assert body > 0.01
+    assert np.abs(left[:10]).max() < 0.05 * body  # fading in
+    assert np.abs(left[16000 - 10:16000]).max() < 0.05 * body  # faded out by beat 4
+    assert np.all(left[16000:48000] == 0)  # resting
+    assert np.abs(left[48000:48010]).max() < 0.05 * body  # fading in again
+    assert np.abs(left[52000:56000]).max() > 0.5 * body
 
 def test_replay_swell_curve():
     e = Entry("v1", 0, 120, "x", 0, 1.0, 4, 2, 0.0, 6.0, 1.0, 0.2, 0.25)

@@ -6,6 +6,7 @@
     counterpoint ensemble set anchor Dm9                 # steer every voice
     counterpoint ensemble set volume 0.5 --voice v2
     counterpoint ensemble set swell-bars 6 --voice v3     # a slower swell for one voice
+    counterpoint ensemble set rest 2                     # two silent bars between samples
     counterpoint listen --midi                           # a MIDI player as a voice
     counterpoint replay ~/.local/state/counterpoint/*.jsonl --out run.wav
 """
@@ -83,6 +84,10 @@ def add_voice_args(p: argparse.ArgumentParser, single: bool = True) -> None:
                         "; a list like 3,4,5,7 gives one per voice"))
     p.add_argument("--swell-drift", type=float, default=0.15,
                    help="how far the swell period wanders each loop (fraction)")
+    p.add_argument("--rest-bars", type=int, default=1,
+                   help="silent bars between one sample and the next (with other voices)")
+    p.add_argument("--fade-ms", type=float, default=200.0,
+                   help="how long each sample fades in and out")
     p.add_argument("--no-normalise", action="store_true",
                    help="play loops at their own level instead of matching loudness")
     p.add_argument("--sr", type=int, default=48000)
@@ -130,15 +135,17 @@ def _make_voice(args, bus=None, clock=None, player=None) -> Voice:
         from .player import DevicePlayer, NullPlayer
 
         if args.dry_run:
-            player = NullPlayer(args.sr, args.pan, args.volume)
+            player = NullPlayer(args.sr, args.pan, args.volume, fade_ms=args.fade_ms)
         else:
             device = int(args.device) if args.device and args.device.isdigit() else args.device
-            player = DevicePlayer(args.sr, device, args.channels, args.pan, args.volume)
+            player = DevicePlayer(args.sr, device, args.channels, args.pan, args.volume,
+                                  fade_ms=args.fade_ms)
     vs = VoiceSettings(
         name=args.name, loops=parse_loops(args.loops),
         prepare_beats=args.prepare_bars * BEATS_PER_BAR,
         log_path=args.log or state_dir() / f"{args.name}.jsonl", pan=args.pan, seed=args.seed,
         swell_db=args.swell, swell_bars=args.swell_bars, swell_drift=args.swell_drift,
+        rest_bars=args.rest_bars, fade_ms=args.fade_ms,
     )
     render = render_from
     if args.no_normalise:
@@ -178,7 +185,7 @@ def cmd_voice(args) -> None:
 def _passthrough(args) -> list[str]:
     out = []
     for flag in ("loops", "anchor", "anchor_weight", "device", "volume", "sr", "prepare_bars",
-                 "max_shift", "max_stretch", "swell", "swell_drift"):
+                 "max_shift", "max_stretch", "swell", "swell_drift", "rest_bars", "fade_ms"):
         v = getattr(args, flag, None)
         if v is not None:
             out += [f"--{flag.replace('_', '-')}", str(v)]
@@ -227,7 +234,7 @@ def cmd_ensemble(args) -> None:
     if args.action == "set":
         if len(args.rest) != 2:
             sys.exit("usage: counterpoint ensemble set "
-                     "anchor|tempo|volume|swell|swell-bars|swell-drift|loops|stop VALUE")
+                     "anchor|tempo|volume|swell|swell-bars|swell-drift|rest|fade|loops|stop VALUE")
         return _set(args.rest[0], args.rest[1], args.voice, args.peers)
     procs = [subprocess.Popen(c) for c in voice_commands(args)]
     print(f"started {len(procs)} voices; Ctrl-C stops them", file=sys.stderr)
@@ -249,8 +256,8 @@ def cmd_ensemble(args) -> None:
 
 
 def _set(key: str, value: str, voice: str | None, peers: list[str]) -> None:
-    if key not in ("anchor", "tempo", "volume", "swell", "swell-bars", "swell-drift", "loops",
-                   "stop"):
+    if key not in ("anchor", "tempo", "volume", "swell", "swell-bars", "swell-drift", "rest",
+                   "fade", "loops", "stop"):
         sys.exit(f"can't set {key!r}")
     bus = UdpBus(peers=peers)
     c = Control(key, value, voice)
@@ -268,7 +275,7 @@ def format_status(states: list[VoiceState]) -> str:
     for s in states:
         p = s.now
         bar = int(s.beat // BEATS_PER_BAR) + 1
-        what = "(input)" if s.is_input else (p.id if p else "-")
+        what = "(input)" if s.is_input else (p.id if p else "(resting)")
         shift = f"{p.shift:+d}" if p and p.shift else "0"
         nxt = "" if s.change_beat is None else f"bar {int(s.change_beat // BEATS_PER_BAR) + 1}"
         if s.next:

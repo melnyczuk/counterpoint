@@ -52,7 +52,9 @@ class VoiceState:
     tempo: float
     now: Playing | None = None
     next: Playing | None = None  # the planned pick, once chosen
-    change_beat: float | None = None
+    change_beat: float | None = None  # the bar its next sample starts on
+    change_locked: bool = False  # preparing for change_beat: it won't move any more
+    end_beat: float | None = None  # where the current sample fades out by
     is_input: bool = False
     texture: bool = False
     band: str | None = None
@@ -76,7 +78,7 @@ class VoiceState:
 
 @dataclass
 class Control:
-    set: str  # anchor | tempo | volume | swell | swell-bars | swell-drift | loops | stop
+    set: str  # anchor|tempo|volume|swell|swell-bars|swell-drift|rest|fade|loops|stop
     value: str
     voice: str | None = None  # None means every voice
     id: str = field(default_factory=lambda: uuid.uuid4().hex)

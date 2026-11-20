@@ -2,6 +2,7 @@
 
     counterpoint voice --loops 4-8 --anchor Am9          # one voice (one per Pi)
     counterpoint ensemble --voices 4 --anchor Am9        # four voices on this machine
+    counterpoint ensemble --catalogue ~/winnower/data    # ... reading this catalogue
     counterpoint ensemble status                         # who's playing what
     counterpoint ensemble set anchor Dm9                 # steer every voice
     counterpoint ensemble set volume 0.5 --voice v2
@@ -70,6 +71,11 @@ def add_voice_args(p: argparse.ArgumentParser, single: bool = True) -> None:
         p.add_argument("--texture", action="store_true", help="only unpitched samples")
         p.add_argument("--log", type=Path, help="play log (default: state dir/NAME.jsonl)")
         p.add_argument("--seed", type=int)
+    # SUPPRESS so these don't clobber the same flags given before the subcommand.
+    p.add_argument("--catalogue", default=argparse.SUPPRESS,
+                   help="winnower storage root (overrides counterpoint.toml)")
+    p.add_argument("--config", default=argparse.SUPPRESS,
+                   help="settings file (default ./counterpoint.toml)")
     p.add_argument("--loops", default="4-8", help="loops before changing: 6 or 4-8")
     p.add_argument("--anchor", help="chord pulling the harmony back, e.g. Am9")
     p.add_argument("--anchor-weight", type=float, default=0.5)

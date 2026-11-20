@@ -268,6 +268,20 @@ def test_voice_commands():
     assert [c[c.index("--swell-bars") + 1] for c in voice_commands(A)] == ["3", "5", "3"]
 
 
+def test_catalogue_flag_either_side_of_subcommand():
+    from counterpoint.cli import build_parser
+
+    parse = build_parser().parse_args
+    args = parse(["ensemble", "--catalogue", "/data", "--voices", "2"])
+    assert args.catalogue == "/data"
+    for cmd in voice_commands(args):
+        assert cmd[cmd.index("--catalogue") + 1] == "/data"
+    assert parse(["--catalogue", "/data", "ensemble"]).catalogue == "/data"
+    assert parse(["ensemble"]).catalogue is None
+    assert parse(["ensemble", "--config", "c.toml"]).config == "c.toml"
+    assert parse(["voice", "--catalogue", "/data", "--dry-run"]).catalogue == "/data"
+
+
 def test_format_status():
     s = other("v1", ["A", "C", "E"], sid="am")
     s.change_beat = 32

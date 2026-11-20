@@ -24,13 +24,13 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .bus import CONTROL, STATE, Control, MemoryBus, UdpBus, VoiceState
 from .chooser import BANDS, Chooser, Library, Role
 from .clock import BEATS_PER_BAR, FreeClock, LinkClock
 from .render import render_from
-from .scoring import Limits
 from .voice import Voice, VoiceSettings, parse_loops
 
 
@@ -100,7 +100,8 @@ def add_voice_args(p: argparse.ArgumentParser, single: bool = True) -> None:
     p.add_argument("--prepare-bars", type=int, default=2,
                    help="bars before a change to pick and render")
     p.add_argument("--max-shift", type=int)
-    p.add_argument("--max-stretch", type=float)
+    p.add_argument("--max-stretch", type=float, help="fastest playback, e.g. 1.25")
+    p.add_argument("--max-slow", type=float, help="slowest playback as a factor, e.g. 4")
     p.add_argument("--commercial", action="store_true", help="only allow-listed licences")
     p.add_argument("--peers", nargs="*", default=[], help="host[:port] where multicast fails")
     p.add_argument("--no-link", action="store_true", help="keep time locally, no Link")
@@ -123,11 +124,9 @@ def _make_voice(args, bus=None, clock=None, player=None) -> Voice:
     if not args.texture and not library.pitched:
         sys.exit("the catalogue has no pitched samples")
     limits = settings.limits
-    if args.max_shift is not None or args.max_stretch is not None:
-        limits = Limits(
-            limits.max_shift if args.max_shift is None else args.max_shift,
-            limits.max_stretch if args.max_stretch is None else args.max_stretch,
-        )
+    for name in ("max_shift", "max_stretch", "max_slow"):
+        if getattr(args, name) is not None:
+            limits = replace(limits, **{name: getattr(args, name)})
     role = Role(band=args.band, texture=args.texture, anchor=args.anchor,
                 anchor_weight=args.anchor_weight)
     import random
@@ -191,7 +190,8 @@ def cmd_voice(args) -> None:
 def _passthrough(args) -> list[str]:
     out = []
     for flag in ("loops", "anchor", "anchor_weight", "device", "volume", "sr", "prepare_bars",
-                 "max_shift", "max_stretch", "swell", "swell_drift", "rest_bars", "fade_ms"):
+                 "max_shift", "max_stretch", "max_slow", "swell", "swell_drift", "rest_bars",
+                 "fade_ms"):
         v = getattr(args, flag, None)
         if v is not None:
             out += [f"--{flag.replace('_', '-')}", str(v)]

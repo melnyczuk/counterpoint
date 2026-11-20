@@ -6,7 +6,8 @@ cache_dir = "~/.cache/counterpoint"
 
 [limits]
 max_shift = 3
-max_stretch = 1.25
+max_stretch = 1.25   # fastest playback
+max_slow = 4.0       # slowest: a quarter of the speed
 
 [weights]
 fit = 1.0
@@ -16,6 +17,7 @@ roughness = 1.0
 shift = 0.02
 stretch = 0.4
 stretch_fitted = 0.1
+slow = 0.25          # slowing costs this share of speeding up
 masking = 0.3
 same_source = 0.5
 ```
@@ -61,5 +63,6 @@ def load(path: str | None = None) -> Settings:
     s.limits = Limits(
         max_shift=int(lim.get("max_shift", Limits.max_shift)),
         max_stretch=float(lim.get("max_stretch", Limits.max_stretch)),
+        max_slow=float(lim.get("max_slow", Limits.max_slow)),
     )
     return s

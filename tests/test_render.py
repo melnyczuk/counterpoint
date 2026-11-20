@@ -33,6 +33,15 @@ def test_render_double_time():
     assert loop.beats == 8  # one bar at 50 BPM is two bars at 100
 
 
+def test_render_quad_time_plays_slower():
+    y = tones([9], dur=2.4)
+    s = sample(bpm=100, bars=1)
+    m = Match(s, 0, 0.0, Parts(0, 0, 0), Stretch(100.0, 100.0, "quad", 0.25), None)
+    loop = render(y, SR, s, m, tempo=100.0, sr=22050)
+    assert loop.beats == 16  # one bar, a quarter of the speed
+    assert loop.frames == round(16 * 60 / 100 * 22050)
+
+
 def test_loudness_of_a_reference_sine():
     sr = 48000
     t = np.arange(3 * sr) / sr

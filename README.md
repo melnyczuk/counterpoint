@@ -25,7 +25,7 @@ one voice per Raspberry Pi in a spatial installation. Tasks are tracked as GitHu
 - [x] Pitch profiles (chroma, pitchedness, band shares), cached outside winnower's storage
 - [x] Targets from chord symbols, MIDI files and audio clips, with inferred or given scale
 - [x] Scoring at all 12 transpositions: fit, colour, roughness, shift cost
-- [x] Tempo matching: stretch ratio with half/double time, stretch cost, limits
+- [x] Tempo matching: stretch ratio with half/double/quad time, slowing preferred to speeding
 - [x] Layering sets: combined fit, band masking and same-recording penalties, texture layer
 - [x] `counterpoint match` with table, JSON and an Ableton set-folder export
 - [x] Ensemble: `voice`, `ensemble` (start, status, set), `listen`, `replay`
@@ -66,8 +66,10 @@ Am9 in A minor, 96.0 BPM: 41 pitched matches of 230 samples
 ```
 
 - **shift**: semitones to put in the clip's Transpose.
-- **stretch**: playback speed to reach the target tempo. `half` or `double` means it fits
-  better at half or double time, so it's warped as such.
+- **stretch**: playback speed to reach the target tempo. `half`, `double` or `quad` means
+  it's counted at half, double or quad time, so it's warped as such. Slowing a sample down
+  is preferred to speeding it up: a ratio below 1 can go to 0.25 (four times as slow),
+  but above 1 only to 1.25.
 - `*` after a file name means its licence is flagged (NC, SA or unknown): clear it before
   release.
 
@@ -136,7 +138,8 @@ of Counterpoint that include them are distributed under the GPL.
 ## Settings
 
 Everything is optional. See `src/counterpoint/config.py` for the full `counterpoint.toml`,
-including the scoring weights, `max_shift` (default 3) and `max_stretch` (default 1.25).
+including the scoring weights, `max_shift` (default 3), `max_stretch` (fastest playback,
+default 1.25) and `max_slow` (slowest, as a factor, default 4).
 Profiles are cached in `~/.cache/counterpoint/profiles.json`.
 
 ## Develop

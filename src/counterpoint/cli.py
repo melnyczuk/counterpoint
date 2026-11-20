@@ -109,6 +109,8 @@ def _match(args) -> None:
         limits = replace(limits, max_shift=0)
     if args.max_stretch is not None:
         limits = replace(limits, max_stretch=args.max_stretch)
+    if args.max_slow is not None:
+        limits = replace(limits, max_slow=args.max_slow)
     if args.no_stretch:
         limits = replace(limits, stretch=False)
     filters = Filters(commercial=args.commercial,
@@ -164,7 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--bpm", type=float, help="target tempo (overrides one from MIDI/audio)")
     m.add_argument("--max-shift", type=int, help="largest suggested shift in semitones")
     m.add_argument("--no-shift", action="store_true", help="only samples that fit unshifted")
-    m.add_argument("--max-stretch", type=float, help="largest stretch ratio, e.g. 1.25")
+    m.add_argument("--max-stretch", type=float, help="fastest playback ratio, e.g. 1.25")
+    m.add_argument("--max-slow", type=float,
+                   help="slowest playback as a factor, e.g. 4 for a quarter of the speed")
     m.add_argument("--no-stretch", action="store_true",
                    help="don't suggest stretches; use the target tempo as a filter")
     m.add_argument("--bpm-filter", type=_bpm_range, help="with no target tempo: 96 or 90-110")

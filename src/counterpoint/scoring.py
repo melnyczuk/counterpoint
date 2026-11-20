@@ -34,6 +34,7 @@ class Weights:
     shift: float = 0.02  # per semitone
     stretch: float = 0.4  # per octave of stretch (|log2 ratio|), for detected grooves
     stretch_fitted: float = 0.1  # the same for fitted tempos (textures, drones)
+    slow: float = 0.25  # slowing down costs this share of what speeding up does
     masking: float = 0.3
     same_source: float = 0.5
 
@@ -43,23 +44,46 @@ class Weights:
         return cls(**known)
 
 
-@dataclass(frozen=True)
-class Limits:
-    max_shift: int = 3
-    max_stretch: float = 1.25  # ratio either way
-    stretch: bool = True
+# How a sample's beats are counted against the target: its loop lasts ``bars * 4 * scale``
+# beats, so at the same tempo "double" plays it twice as slow and "quad" four times.
+SCALE = {"half": 0.5, "normal": 1.0, "double": 2.0, "quad": 4.0}
+
+
+def scale_of(time: str) -> float:
+    """The beat scale for a reading: one of :data:`SCALE`, or ``x8``, ``x16``... for the
+    extra-slow readings the last-resort limits allow."""
+    return SCALE[time] if time in SCALE else float(time.lstrip("x"))
 
 
 @dataclass(frozen=True)
 class Stretch:
     target_bpm: float
     sample_bpm: float
-    time: str  # half | normal | double
+    time: str  # half | normal | double | quad (or x8, x16... as a last resort)
     ratio: float  # playback speed: >1 is faster
 
     @property
     def octaves(self) -> float:
         return abs(math.log2(self.ratio))
+
+    @property
+    def scale(self) -> float:
+        return scale_of(self.time)
+
+
+@dataclass(frozen=True)
+class Limits:
+    max_shift: int = 3
+    max_stretch: float = 1.25  # fastest playback: speeding up is audible sooner
+    stretch: bool = True
+    max_slow: float = 4.0  # slowest playback, as a factor: 4 is a quarter of the speed
+
+    def allows(self, st: Stretch | None) -> bool:
+        if st is None:
+            return True
+        if st.ratio >= 1:
+            return st.ratio <= self.max_stretch + 1e-9
+        return 1 / st.ratio <= self.max_slow + 1e-9
 
 
 @dataclass(frozen=True)
@@ -90,14 +114,36 @@ def shifted(profile: Profile, shift: int) -> np.ndarray:
     return np.roll(profile.vector, shift)
 
 
-def best_stretch(sample: Sample, target_bpm: float | None) -> Stretch | None:
-    """The playback ratio to bring the sample to the target tempo, trying it at half,
-    normal and double time and keeping whichever needs the least stretching."""
+LAST_RESORT_SLOW = 64.0  # limits this loose may count beats past quad time
+
+
+def best_stretch(
+    sample: Sample, target_bpm: float | None, w: Weights | None = None,
+    limits: Limits | None = None,
+) -> Stretch | None:
+    """The playback ratio to bring the sample to the target tempo, reading it at half,
+    normal, double or quad time. Of the readings the limits allow, the cheapest wins, and
+    slowing down is cheaper than speeding up. With none allowed, it's the reading needing
+    the least stretch (which the caller then rejects)."""
     if not target_bpm or not sample.bpm:
         return None
-    options = [("half", sample.bpm / 2), ("normal", sample.bpm), ("double", sample.bpm * 2)]
-    time, eff = min(options, key=lambda o: abs(math.log2(target_bpm / o[1])))
-    return Stretch(target_bpm, sample.bpm, time, round(target_bpm / eff, 4))
+    w = w or Weights()
+    limits = limits or Limits()
+    options = [Stretch(target_bpm, sample.bpm, t, round(target_bpm / (sample.bpm * m), 4))
+               for t, m in SCALE.items()]
+    ok = [o for o in options if limits.allows(o)]
+    if not ok and limits.max_slow >= LAST_RESORT_SLOW:
+        # Far too slow a sample for the target: count its beats wider still, so it plays
+        # slower rather than much faster.
+        m = SCALE["quad"]
+        while not ok and m < 1024:
+            m *= 2
+            o = Stretch(target_bpm, sample.bpm, f"x{m:g}", round(target_bpm / (sample.bpm * m), 4))
+            if limits.allows(o):
+                ok = [o]
+    if ok:
+        return min(ok, key=lambda o: stretch_cost(sample, o, w))
+    return min(options, key=lambda o: o.octaves)
 
 
 @dataclass(frozen=True)
@@ -152,6 +198,8 @@ def stretch_cost(sample: Sample, stretch: Stretch | None, w: Weights) -> float:
     if stretch is None:
         return 0.0
     per = w.stretch if sample.tempo_source == "detected" else w.stretch_fitted
+    if stretch.ratio < 1:
+        per *= w.slow
     return per * stretch.octaves
 
 
@@ -162,8 +210,8 @@ def score_sample(
     (unpitched, or needs more stretch than allowed)."""
     if not profile.pitched:
         return None
-    stretch = best_stretch(sample, target.bpm) if limits.stretch else None
-    if stretch is not None and stretch.octaves > math.log2(limits.max_stretch) + 1e-9:
+    stretch = best_stretch(sample, target.bpm, w, limits) if limits.stretch else None
+    if not limits.allows(stretch):
         return None
     if not limits.stretch and target.bpm and sample.bpm:
         # Without stretching, the tempo is only a filter: half/double time is still fine.
@@ -187,8 +235,8 @@ def texture_match(sample: Sample, profile: Profile, target: Target, w: Weights, 
     only."""
     if profile.pitched:
         return None
-    stretch = best_stretch(sample, target.bpm) if limits.stretch else None
-    if stretch is not None and stretch.octaves > math.log2(limits.max_stretch) + 1e-9:
+    stretch = best_stretch(sample, target.bpm, w, limits) if limits.stretch else None
+    if not limits.allows(stretch):
         return None
     cost = stretch_cost(sample, stretch, w)
     return Match(sample, 0, -cost, Parts(0.0, 0.0, 0.0), stretch, profile)

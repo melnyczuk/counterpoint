@@ -4,7 +4,13 @@ import pytest
 from counterpoint.catalogue import Sample
 from counterpoint.harmony import NOTES, Target, parse_chord
 from counterpoint.profile import Profile
-from counterpoint.scoring import Limits, Weights, best_stretch, score_sample
+from counterpoint.scoring import (
+    LAST_RESORT_SLOW,
+    Limits,
+    Weights,
+    best_stretch,
+    score_sample,
+)
 
 
 def prof(*notes):
@@ -65,7 +71,10 @@ def test_unpitched_excluded():
 @pytest.mark.parametrize(
     "sample_bpm,target_bpm,time,ratio",
     [(96, 96, "normal", 1.0), (72, 140, "double", 0.9722), (140, 70, "half", 1.0),
-     (100, 110, "normal", 1.1)],
+     (100, 110, "normal", 1.1),  # a small speed-up is still cheaper than slowing by 1.8x
+     (100, 120, "double", 0.6),  # slowing by 1.67x beats speeding up by 1.2x
+     (100, 130, "double", 0.65),  # 1.3x faster isn't allowed at all
+     (100, 380, "quad", 0.95)],
 )
 def test_stretch(sample_bpm, target_bpm, time, ratio):
     s = best_stretch(sample(sample_bpm), target_bpm)
@@ -73,9 +82,34 @@ def test_stretch(sample_bpm, target_bpm, time, ratio):
     assert s.ratio == pytest.approx(ratio, abs=1e-4)
 
 
-def test_stretch_limit_excludes():
+def test_slows_rather_than_speeds_past_the_limit():
     m = score_sample(sample(96), prof("A", "C", "E"), target("Am", bpm=130), Weights(), Limits())
-    assert m is None  # 130/96 = 1.35 > 1.25
+    assert m.stretch.time == "double"  # 130/96 = 1.35x faster is over the limit
+    assert m.stretch.ratio == pytest.approx(130 / 192, abs=1e-4)
+
+
+def test_stretch_limit_excludes():
+    lim = Limits(max_slow=1.2)
+    m = score_sample(sample(96), prof("A", "C", "E"), target("Am", bpm=130), Weights(), lim)
+    assert m is None  # 1.35x faster, or 1.48x slower: both over the limits
+
+
+def test_slowing_is_cheaper_than_speeding():
+    w = Weights()
+    s = sample(100, "detected")
+    fast = best_stretch(s, 120, w, Limits(max_slow=1.0))
+    slow = best_stretch(s, 120, w, Limits(max_stretch=1.0))
+    assert fast.ratio == 1.2 and slow.ratio == 0.6
+    m_fast = score_sample(s, prof("C", "E", "G"), target("C", bpm=120), w, Limits(max_slow=1.0))
+    m_slow = score_sample(s, prof("C", "E", "G"), target("C", bpm=120), w, Limits())
+    assert m_slow.score > m_fast.score
+
+
+def test_never_twice_as_fast_even_as_a_last_resort():
+    lim = Limits(6, max_stretch=1.5, max_slow=LAST_RESORT_SLOW)
+    st = best_stretch(sample(10), 200, Weights(), lim)  # quad would still be 5x faster
+    assert st.time == "x16" and st.scale == 16
+    assert st.ratio == pytest.approx(1.25)
 
 
 def test_detected_groove_costs_more_to_stretch():

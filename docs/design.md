@@ -126,16 +126,24 @@ every loop to 1, 2, 4 or 8 bars at a whole-number BPM and records it in the side
 (`bpm`, `bars`, `tempo_source`), so the stretch is a ratio and the loop stays a whole
 number of bars at the new tempo.
 
-- Ratio = target BPM / sample BPM, trying the sample at half, normal and double time and
-  keeping whichever ratio is closest to 1. A 72 BPM loop against a 140 BPM input plays at
-  double time with a ratio of 0.97, not 1.94.
+- Ratio = target BPM / (sample BPM x scale), reading the sample at half, normal, double or
+  quad time (scale 0.5, 1, 2, 4; the loop lasts `bars x scale` bars at the target). Of
+  the readings within the limits, the one with the lowest stretch cost wins. A 72 BPM
+  loop against a 140 BPM input plays at double time with a ratio of 0.97, not 1.94; a
+  100 BPM loop against 120 plays at double time, 1.67 times slower, rather than 1.2
+  times faster.
 - **Stretch cost**: a penalty growing with `|log2(ratio)|`, added to the score alongside
   the shift cost. It's steeper for `tempo_source: detected` samples (a real groove smears
   audibly when stretched) and gentler for `fitted` ones (rain, drones, crackle, whose
-  "tempo" is only a loop length).
-- `--max-stretch R` limits the ratio (proposed default 1.25, i.e. up to 25% either way);
-  samples outside it are dropped rather than ranked low. `--no-stretch` falls back to
-  using the BPM only as a filter.
+  "tempo" is only a loop length). Slowing down costs a quarter as much as speeding up
+  (weight `slow`): a slowed sample stretches into something new, while a sped-up one
+  just sounds hurried.
+- The limits are asymmetric: `--max-stretch R` is the fastest playback (default 1.25) and
+  `--max-slow F` the slowest, as a factor (default 4, a quarter of the speed). Samples
+  outside them are dropped rather than ranked low. When a voice finds nothing, it relaxes
+  slowing first (to 8, then 64, counting beats at x8, x16... if needed) and speeding only
+  to 1.5, so nothing plays near twice as fast. `--no-stretch` falls back to using the BPM
+  only as a filter.
 - Pitch and time are suggested independently, assuming the DAW stretches without
   changing pitch (Ableton's Complex/Complex Pro or Texture warp modes). If someone
   repitches by resampling instead, the speed change moves the pitch too, so the report

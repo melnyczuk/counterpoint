@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import random
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -20,7 +20,7 @@ from .bus import Playing, VoiceState
 from .catalogue import Sample
 from .harmony import Target, parse_chord
 from .profile import Profile
-from .scoring import Limits, Match, Weights, score_sample, texture_match
+from .scoring import LAST_RESORT_SLOW, Limits, Match, Weights, score_sample, texture_match
 
 BANDS = {"low": 0, "mid": 1, "high": 2}
 
@@ -116,10 +116,12 @@ class Chooser:
         # Never go silent: with a small library, relax step by step until something fits.
         # Doubling another voice's sample is the last resort; repeating our own is
         # the one before it.
-        wide = Limits(6, 64.0, True)
+        # Slowing is relaxed far more than speeding: nothing ever plays near twice as fast.
+        wide = Limits(6, max_stretch=1.5, stretch=True, max_slow=LAST_RESORT_SLOW)
         for limits, avoid_taken, avoid_own in (
             (self.limits, True, True),
-            (Limits(self.limits.max_shift, 2.0, self.limits.stretch), True, True),
+            (replace(self.limits, max_stretch=max(self.limits.max_stretch, 1.5),
+                     max_slow=max(self.limits.max_slow, 8.0)), True, True),
             (wide, True, True),
             (wide, True, False),
             (wide, False, False),
@@ -144,7 +146,7 @@ class Chooser:
         if target is None:
             # Nothing to fit with yet: every shift is as good as none, so don't shift.
             target = Target(np.ones(12), np.zeros(12), np.ones(12), "free", "any", tempo)
-            limits = Limits(0, limits.max_stretch, limits.stretch)
+            limits = replace(limits, max_shift=0)
         out = []
         for s in pool:
             if s.id in taken or (use_history and s.id in self.history):

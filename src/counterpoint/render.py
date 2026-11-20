@@ -42,13 +42,13 @@ class Loop:
 def loop_beats(sample: Sample, match: Match, tempo: float, duration_s: float) -> float:
     """How many beats the loop lasts at ``tempo``.
 
-    With a winnower beat grid, it's the sample's bars, scaled for half or double time.
+    With a winnower beat grid, it's the sample's bars, scaled for half, double or quad
+    time.
     Without one, it's the duration rounded to whole bars at the current tempo.
     """
     st = match.stretch
     if sample.bars and sample.bpm and st is not None:
-        scale = {"half": 0.5, "normal": 1.0, "double": 2.0}[st.time]
-        return sample.bars * BEATS_PER_BAR * scale
+        return sample.bars * BEATS_PER_BAR * st.scale
     if sample.bars and sample.bpm:
         return sample.bars * BEATS_PER_BAR
     bars = max(1, round(duration_s * tempo / 60.0 / BEATS_PER_BAR))

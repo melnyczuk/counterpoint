@@ -242,6 +242,11 @@ def cmd_ensemble(args) -> None:
             sys.exit("usage: counterpoint ensemble set "
                      "anchor|tempo|volume|swell|swell-bars|swell-drift|rest|fade|loops|stop VALUE")
         return _set(args.rest[0], args.rest[1], args.voice, args.peers)
+    # Analyse once here so the voices start with a warm cache instead of all analysing
+    # (and saving) the same samples at once.
+    from .cli import _open
+
+    _open(args)
     procs = [subprocess.Popen(c) for c in voice_commands(args)]
     print(f"started {len(procs)} voices; Ctrl-C stops them", file=sys.stderr)
     try:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -112,9 +113,22 @@ class ProfileCache:
         if not self._dirty:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"version": PROFILE_VERSION, "profiles": self._data}))
-        tmp.replace(self.path)
+        # Several voices may save at once: keep what others wrote since we loaded, and
+        # write through a temp file of our own so no writer renames another's away.
+        try:
+            raw = json.loads(self.path.read_text())
+            if raw.get("version") == PROFILE_VERSION:
+                self._data = {**raw.get("profiles", {}), **self._data}
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix="profiles.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"version": PROFILE_VERSION, "profiles": self._data}, f)
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         self._dirty = False
 
 
